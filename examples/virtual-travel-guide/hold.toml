@@ -1,0 +1,28 @@
+# HOLD 프로젝트 설정 — 사람 소유 파일 (보호 경로)
+# 키트의 훅과 스크립트가 이 파일을 읽습니다.
+
+[hold]
+version = "0.1"
+profile = "lite"          # lite | standard | regulated
+
+[paths]
+stakeholders = "docs/architecture/stakeholders.md"
+context_view = "docs/architecture/views/context.md"
+changes = "changes"                         # 변경 단위 폴더: changes/<YYYYMMDD-이름>/
+contracts = "app/contracts"                 # 계약 패키지 (Stage 2.5)
+generated_views = "docs/architecture/views/generated"
+hook_log = ".hold/logs/hooks.jsonl"         # 측정용 훅 로그 (Git 밖)
+
+[protect]
+# H1 사람의 역할: 아래 경로는 사람만 수정합니다.
+# 끝이 "/"면 폴더 전체, 아니면 그 파일 하나입니다.
+paths = [
+  "app/contracts/",
+  "tests/contracts/",
+  "tests/golden/",
+  "tests/evals/",
+  "docs/architecture/stakeholders.md",
+  "hold.toml",
+  ".importlinter",
+  ".claude/",
+]

@@ -1,0 +1,28 @@
+# HOLD 커밋 전 검사 (pre-commit). 설치: pip install pre-commit && pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: hold-check-views
+        name: HOLD 산출물·필수 뷰 검사 (R05·R06)
+        entry: python scripts/check_views.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: hold-gen-views
+        name: HOLD 사실 뷰 최신성 검사
+        entry: python scripts/gen_views.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: hold-contract-golden
+        name: 계약·골든 테스트 (R04, 테스트가 아직 없으면 통과)
+        entry: python -c "import subprocess,sys; r=subprocess.call([sys.executable,'-m','pytest','tests/contracts','tests/golden','-q']); sys.exit(0 if r in (0,5) else r)"
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: hold-lint-imports
+        name: 모듈 경계 검사 (R02)
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        types: [python]

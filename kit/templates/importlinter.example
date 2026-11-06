@@ -1,0 +1,40 @@
+# HOLD 4장 A1 모듈 경계 — 사람 소유 파일 (보호 경로)
+# 프로젝트 구조에 맞게 모듈 이름을 바꾸세요. 규칙을 넣은 뒤에는
+# "정상 코드가 통과하는지"와 "일부러 넣은 위반이 걸리는지"를 둘 다 확인합니다.
+
+[importlinter]
+root_package = app
+
+# 규칙 1: 의존 방향은 위에서 아래로만
+[importlinter:contract:layers]
+name = 의존 방향: serving → agent → modules → contracts → platform
+type = layers
+layers =
+    app.serving
+    app.agent
+    app.modules
+    app.contracts
+    app.platform
+
+# 규칙 2: 도메인 모듈끼리는 서로 모른다 (조율은 agent 가 한다)
+[importlinter:contract:independent-modules]
+name = 도메인 모듈은 서로 import 하지 않는다
+type = independence
+modules =
+    app.modules.places
+    app.modules.dining
+    app.modules.itinerary
+
+# 규칙 3: 모듈 내부 구현은 그 모듈만 사용 (밖에서는 api.py 로만)
+[importlinter:contract:no-internal]
+name = 모듈 _internal 은 외부에서 import 금지
+type = forbidden
+source_modules =
+    app.agent
+    app.serving
+forbidden_modules =
+    app.modules.places._internal
+    app.modules.dining._internal
+    app.modules.itinerary._internal
+# api.py 를 거쳐 _internal 에 닿는 간접 경로는 정상. 직접 import 만 금지
+allow_indirect_imports = True
