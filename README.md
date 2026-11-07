@@ -58,5 +58,5 @@ v0.1은 동결 후 실증 기간 동안 바꾸지 않습니다. 실증 중의 �
 ## 기반
 
 - Anthropic, [The AI-Native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook) (2026-08-21) — 흐름
-- AI-friendly 모듈러 아키텍처 7원칙 (K MediaLab 내부 가이드, 5판) — 구조. 공개본에서는 [4장](method/04-architecture.md)으로 흡수
+- AI-friendly 모듈러 아키텍처 7원칙 (DeepData 내부 가이드, 5판) — 구조. 공개본에서는 [4장](method/04-architecture.md)으로 흡수
 - ISO/IEC/IEEE 42010 (아키텍처 기술의 이해관계자·관심사·관점), C4 모델, UML — 이해관계자와 관점

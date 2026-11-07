@@ -1,6 +1,6 @@
 # 이 프로젝트는 HOLD 방법론(v0.1)을 따른다
 
-프로필과 경로는 `hold.toml`을 본다. 방법론 본문: https://github.com/<계정>/hold-method
+프로필과 경로는 `hold.toml`을 본다. 방법론 본문: https://github.com/datainworld/hold-method
 
 ## 사람이 소유한 것 — 수정 금지
 - `hold.toml`의 `[protect].paths` 전부 (계약, 채점 기준 테스트, 이해관계자 정의서, 설정)

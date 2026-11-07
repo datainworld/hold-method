@@ -52,5 +52,5 @@ AI 코딩 에이전트에게 구현을 맡기면서도, 그 결과를 사람이 
 ## 기반
 
 - Anthropic, [The AI-Native SDLC playbook](https://claude.com/blog/the-ai-native-sdlc-playbook) (2026-08-21) — 단계별 산출물 체인, 훅 기반 게이트, 단계별 지표
-- AI-friendly 모듈러 아키텍처 7원칙 (K MediaLab 내부 가이드, 5판) — 모듈 경계, 계약 우선, 데이터 소유, 검증 계층. 공개본에서는 4장으로 흡수하고 예제를 새로 썼습니다.
+- AI-friendly 모듈러 아키텍처 7원칙 (DeepData 내부 가이드, 5판) — 모듈 경계, 계약 우선, 데이터 소유, 검증 계층. 공개본에서는 4장으로 흡수하고 예제를 새로 썼습니다.
 - ISO/IEC/IEEE 42010의 이해관계자·관심사·관점 개념, C4 모델, UML — 3장
