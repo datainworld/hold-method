@@ -41,14 +41,15 @@ GUIDES = [
 ]
 LEGACY = "el.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });\n"
 
-# 가짜 MWG CLI: legacy-scan 은 대상 폴더에서 LEGACY 패턴을 찾아 실제와 같은 모양의 JSON 을 낸다
-FAKE_NPX = r'''
+# 가짜 node: 래퍼·검사가 "node <사본>/modern-web.mjs <하위 명령> …" 으로 부르면 MWG 처럼 응답한다
+FAKE_NODE = r'''
 import json, os, sys
-args = sys.argv[1:]
+args = sys.argv[2:]          # argv[1] = modern-web.mjs 경로
 log = os.environ.get("FAKE_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"args": args, "telemetry_off": os.environ.get("DISABLE_TELEMETRY") == "1"}) + "\n")
+        fh.write(json.dumps({"cli": sys.argv[1], "args": args,
+                             "telemetry_off": os.environ.get("DISABLE_TELEMETRY") == "1"}) + "\n")
 mode = os.environ.get("FAKE_SCAN")
 if "legacy-scan" in args:
     if mode == "error":
@@ -60,7 +61,7 @@ if "legacy-scan" in args:
     for dp, _, fns in os.walk(target):
         for fn in fns:
             p = os.path.join(dp, fn)
-            if "e.key === 'Enter'" in open(p, encoding="utf-8").read():
+            if "e.key === 'Enter'" in open(p, encoding="utf-8", errors="replace").read():
                 findings.append({"file": os.path.relpath(p, target).replace(os.sep, "/"), "line": 1,
                                  "message": "Keydown Enter without isComposing"})
     guides = [{"guideId": "ime-safe-enter-submit", "count": len(findings),
@@ -68,17 +69,9 @@ if "legacy-scan" in args:
     print(json.dumps({"totalFindings": len(findings), "guides": guides}))
 elif "retrieve" in args:
     ids = args[args.index("retrieve") + 1].split(",")
-    print("\n".join(f"--- Guide for {i} ---\n# {i}\n" for i in ids))
-'''
-# 가짜 npm: pack --offline 이면 FAKE_PACK 파일을 대상 폴더로 복사 (재생성 대조 시험용)
-FAKE_NPM = r'''
-import os, shutil, sys
-args = sys.argv[1:]
-src = os.environ.get("FAKE_PACK")
-if args and args[0] == "pack" and src and os.path.exists(src):
-    dest = args[args.index("--pack-destination") + 1]
-    shutil.copyfile(src, os.path.join(dest, "modern-web-guidance-1.0.0.tgz")); sys.exit(0)
-sys.exit(1)
+    print("\n".join(f"--- Guide for {i} ---\n# {i}\n" for i in ids if i != "made-up"))
+elif "search" in args:
+    print(json.dumps([{"id": "dialog", "description": "x"}]))
 '''
 
 
@@ -89,6 +82,7 @@ def make_tarball(path: Path, *, version: str = "1.0.0", skill: str = SKILL_SRC, 
         "package/skills/modern-web-guidance/SKILL.md": skill,
         "package/skills/modern-web-guidance/skill-version.txt": "2026_11_09-test\n",
         "package/skills/modern-web-guidance/gen/guides.json": json.dumps(GUIDES),
+        "package/skills/modern-web-guidance/modern-web.mjs": "// fake cli",
     }
     with tarfile.open(path, "w:gz") as tf:
         for name, text in files.items():
@@ -134,7 +128,7 @@ def set_toml(root: Path, old: str, new: str) -> None:
 class Proj:
     def __init__(self, root: Path, bin_dir: Path, tmp: Path, tarball: Path):
         self.root, self.bin, self.tmp, self.tarball = root, bin_dir, tmp, tarball
-        self.calls = tmp / "npx_calls.jsonl"
+        self.calls = tmp / "node_calls.jsonl"
 
     def env(self, path: list[Path] | None = None, **extra: str) -> dict:
         dirs = path if path is not None else [self.bin]
@@ -184,9 +178,18 @@ def ext_install(root: Path, *args: str, env: dict | None = None) -> subprocess.C
 def fake_bin(tmp_path: Path) -> Path:
     d = tmp_path / "fakebin"
     d.mkdir()
-    _exe(d, "npx", FAKE_NPX)
-    _exe(d, "npm", FAKE_NPM)
+    _exe(d, "node", FAKE_NODE)
     return d
+
+
+def sri_of(path: Path) -> str:
+    import base64
+    import hashlib
+    return "sha512-" + base64.b64encode(hashlib.sha512(path.read_bytes()).digest()).decode()
+
+
+def sync_cmd(root: Path, *args: str) -> list[str]:
+    return [sys.executable, str(root / ".claude/hold-web/sync.py"), "--root", str(root), *args]
 
 
 def build(tmp_path: Path, fake_bin: Path, profile: str = "standard", ready: bool = True) -> Proj:
@@ -197,8 +200,8 @@ def build(tmp_path: Path, fake_bin: Path, profile: str = "standard", ready: bool
     tarball = make_tarball(tmp_path / "mwg-1.0.0.tgz")
     p = Proj(root, fake_bin, tmp_path, tarball)
     if ready:
-        res = subprocess.run([sys.executable, str(root / ".claude/hold-web/sync.py"), "--root", str(root),
-                              "--pin", "1.0.0", "--tarball", str(tarball)], capture_output=True, text=True, env=clean_env())
+        res = subprocess.run(sync_cmd(root, "--pin", "1.0.0", "--tarball", str(tarball), "--integrity", sri_of(tarball)),
+                             capture_output=True, text=True, env=clean_env())
         assert res.returncode == 0, res.stderr
         usage = root / "docs/architecture/usage-environments.md"
         usage.write_text(usage.read_text(encoding="utf-8").replace(
@@ -206,6 +209,7 @@ def build(tmp_path: Path, fake_bin: Path, profile: str = "standard", ready: bool
         snippet = (EXT / "kit/templates/pre-commit-snippet.yaml").read_text(encoding="utf-8")
         pc = root / ".pre-commit-config.yaml"
         pc.write_text(pc.read_text(encoding="utf-8").rstrip("\n") + "\n" + snippet, encoding="utf-8")
+        p.pre("Bash", command="ls")   # 지속 스냅샷의 기준을 만든다 (처음 훅은 기준만 남김)
     return p
 
 

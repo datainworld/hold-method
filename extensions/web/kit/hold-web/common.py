@@ -1,11 +1,17 @@
-"""HOLD 웹 확장 web-0.1 공통 모듈 — 설정 검증, 셸 명령 해석, 보호 경로, 고정 버전 생성물, 레거시 검사.
+"""HOLD 웹 확장 web-0.1 공통 모듈.
 
 설치 위치: <프로젝트>/.claude/hold-web/common.py (보호 경로). 코어 키트 파일은 import 하지 않습니다.
+
+위협 모델 (extensions/web/README.md 1절): 실수하는 협조적 에이전트. 훅은 실수와 흔한 셸 형태를 막고,
+의도적인 우회의 최종 방어선은 커밋 검사와 CI(install.py --verify, web_check.py) 입니다.
 """
 from __future__ import annotations
 
 import base64
+import fnmatch
+import glob as _glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -24,44 +30,52 @@ except ModuleNotFoundError:  # Python < 3.11
 
 EXT_VERSION = "0.1"
 PKG = "modern-web-guidance"
-ALLOWED_SUBCOMMANDS = {"search", "retrieve", "list", "legacy-scan"}
+ALLOWED_SUBCOMMANDS = ("search", "retrieve", "list", "legacy-scan")
 VALUE_OPTIONS = {"--skill-version", "--agent", "--format", "--limit", "--category"}
-SCAN_TIMEOUT = 100          # 초. 훅 timeout(120초)보다 짧게
+SCAN_TIMEOUT = 100
 HOOK_TIMEOUT_MIN = 120
+HASH_LIMIT = 1 << 20     # 이보다 작은 파일은 스냅샷에 내용 해시를 넣는다
 
-# 생성물 (sync 가 쓰고, web_check 가 대조)
+# 경로
+WRAPPER = ".claude/hold-web/mwg.py"
+EXT_DIR = ".claude/hold-web"
+EXT_MANIFEST = ".claude/hold-web/MANIFEST.json"
+GUARD = ".claude/hooks/web_guard.py"
 SKILL_PATH = ".claude/skills/modern-web-guidance/SKILL.md"
 LICENSE_PATH = ".claude/skills/modern-web-guidance/LICENSE"
 GUIDES_PATH = "docs/hold/web/guides.json"
 LOCK_PATH = "docs/hold/web/lock.json"
 MWGRC_PATH = ".mwgrc"
 USAGE_PATH = "docs/architecture/usage-environments.md"
-SNAP_DIR = ".hold/logs/web_snap"
+PKG_STORE = ".hold/web-pkg"          # 검증된 패키지 사본 (Git 밖, 확장이 보호)
+SNAP_FILE = ".hold/logs/web_snap.json"
 HOOK_LOG = ".hold/logs/hooks.jsonl"
+PRECOMMIT = ".pre-commit-config.yaml"
 
-# 확장이 스스로 지키는 경로 (코어 보호 목록과 별개 — 코어 파일을 고치지 않기 위해)
-PROTECTED_PREFIXES = (
-    "docs/hold/web/",
-    ".hold/logs/",
-    ".claude/hold-web/",
-    ".claude/skills/modern-web-guidance/",
-    ".claude/hooks/web_guard.py",
-    USAGE_PATH,
+# 확장이 지키는 경로 (코어 보호 목록과 별개). 코어가 이미 지키는 hold.toml·.claude/ 도 Bash 판정을 더 엄격히 하려고 넣는다
+PROTECTED_PREFIXES = (".claude/", "hold.toml", "docs/hold/web/", ".hold/logs/", PKG_STORE + "/", USAGE_PATH, PRECOMMIT)
+PROTECTED_BASENAMES = (".mwgrc",)    # 위치 무관 (MWG 는 상위 폴더·홈의 .mwgrc 도 읽는다)
+PROTECTED_CANDIDATES = (             # 글롭 패턴과 대조할 구체적인 이름
+    ".claude", ".claude/settings.json", ".claude/settings.local.json", GUARD, EXT_DIR, WRAPPER, EXT_MANIFEST,
+    EXT_DIR + "/common.py", EXT_DIR + "/sync.py", EXT_DIR + "/web_check.py", EXT_DIR + "/web_scan.py", EXT_DIR + "/VERSION",
+    ".claude/skills/modern-web-guidance", SKILL_PATH, LICENSE_PATH, "hold.toml", ".mwgrc", "docs/hold/web",
+    GUIDES_PATH, LOCK_PATH, ".hold", ".hold/logs", HOOK_LOG, SNAP_FILE, PKG_STORE, USAGE_PATH, PRECOMMIT,
 )
-PROTECTED_BASENAMES = (".mwgrc",)   # 위치와 상관없이 (MWG 는 상위 폴더·홈의 .mwgrc 도 읽는다)
-HUMAN_ONLY_SCRIPTS = (".claude/hold-web/sync.py", "extensions/web/install.py", "hold-web/sync.py")
-READONLY_ALLOWED_SCRIPTS = ("hold-web/web_check.py", "hold-web/web_scan.py")
+HUMAN_ONLY = (EXT_DIR + "/sync.py", "extensions/web/install.py")
+AGENT_SCRIPTS = (WRAPPER, EXT_DIR + "/web_check.py", EXT_DIR + "/web_scan.py")
 READONLY_COMMANDS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "ls", "wc",
-                     "diff", "stat", "file", "md5sum", "sha256sum", "sha1sum", "type", "realpath"}
+                     "diff", "stat", "file", "md5sum", "sha256sum", "sha1sum", "realpath", "readlink", "type"}
 READONLY_GIT = {"diff", "log", "show", "status", "blame", "ls-files"}
-WRAPPERS = {"env", "command", "exec", "time", "nohup", "sudo", "nice", "builtin", "xargs", "timeout", "stdbuf"}
+GIT_WRITE_OPTS = ("--output", "-o", "--output-directory", "--ext-diff")
+WRAPPERS = {"env", "command", "exec", "time", "nohup", "sudo", "nice", "builtin", "xargs", "timeout", "stdbuf", "setsid"}
 WRAPPER_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-I", "-i", "-n", "-L", "-d", "-P", "-s", "-E", "-k", "--signal"}
-# 패키지 이름이 나와도 실행으로 보지 않는 명령 (fail-closed 예외)
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 MENTION_OK = READONLY_COMMANDS | {"echo", "printf", "cd", "pushd", "popd", "test", "[", "git", "true"}
-SHELLS = {"bash", "sh", "zsh", "dash"}
+GLOB_META = set("*?[")
 
 DEFAULTS: dict = {
     "enabled": False,
+    "disabled_reason": "",
     "ext_version": EXT_VERSION,
     "since": "",
     "mwg_version": "1.0.0",
@@ -95,7 +109,6 @@ def load_toml(root: Path) -> dict:
 
 
 def web_config(cfg: dict) -> tuple[dict, list[str]]:
-    """[web] 을 기본값과 합치고 형을 검사한다. (설정, 오류 목록)."""
     raw = cfg.get("web") or {}
     errors: list[str] = []
     out = dict(DEFAULTS)
@@ -137,23 +150,47 @@ def scan_mode(w: dict, profile: str) -> str:
 
 
 def log(root: Path, record: dict) -> None:
+    """훅 로그. ensure_ascii 로 써서 이상한 파일 이름에도 깨지지 않는다."""
     try:
         import datetime as _dt
         f = root / HOOK_LOG
         f.parent.mkdir(parents=True, exist_ok=True)
         record = {"ts": _dt.datetime.now().isoformat(timespec="seconds"), "ext": f"web-{EXT_VERSION}", **record}
         with f.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
+            fh.write(json.dumps(record, ensure_ascii=True) + "\n")
+    except Exception:  # noqa: BLE001 — 기록 실패가 판정을 바꾸지 않게
         pass
 
 
-# ── 경로 ──────────────────────────────────────────────────────────────
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def sha256_raw(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sri(data: bytes) -> str:
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+
+
+# ── 경로 정규화와 보호 판정 ──────────────────────────────────────────
+
+_STREAM = re.compile(r":(?::?\$data|[^/:]*)$", re.I)
+
+
+def norm(p: str) -> str:
+    """대소문자·구분자·NTFS 대체 스트림·끝의 점과 공백을 정규화한 posix 문자열."""
+    s = p.replace("\\", "/").strip()
+    s = re.sub(r"^[a-zA-Z]:/", "/", s)          # 드라이브 문자
+    s = _STREAM.sub("", s) if ":" in s.rsplit("/", 1)[-1] else s
+    parts = [seg.rstrip(" .") if seg not in (".", "..") else seg for seg in s.split("/")]
+    return "/".join(parts).casefold()
+
 
 def rel_posix(root: Path, raw: str) -> str | None:
-    """프로젝트 루트 기준 posix 경로. 루트 밖이면 None."""
-    p = Path(raw)
-    p = (p if p.is_absolute() else root / p)
+    p = Path(raw.replace("\\", "/"))
+    p = p if p.is_absolute() else root / p
     try:
         p = p.resolve()
     except OSError:
@@ -164,69 +201,94 @@ def rel_posix(root: Path, raw: str) -> str | None:
         return None
 
 
+def _prefix_hit(rel_norm: str) -> bool:
+    for pre in PROTECTED_PREFIXES:
+        pn = pre.casefold()
+        if pn.endswith("/"):
+            if rel_norm == pn.rstrip("/") or rel_norm.startswith(pn):
+                return True
+        elif rel_norm == pn:
+            return True
+    return False
+
+
 def is_protected_path(root: Path, raw: str) -> bool:
-    name = raw.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    if name in PROTECTED_BASENAMES:
+    n = norm(raw)
+    if n.rstrip("/").rsplit("/", 1)[-1] in PROTECTED_BASENAMES:
         return True
     rel = rel_posix(root, raw)
     if rel is None:
         return False
-    return any(rel == p.rstrip("/") or rel.startswith(p) for p in PROTECTED_PREFIXES)
-
-
-def token_mentions_protected(tok: str) -> bool:
-    t = tok.replace("\\", "/")
-    if any(b in t for b in PROTECTED_BASENAMES):
+    if _prefix_hit(norm(rel)):
         return True
-    return any(p.rstrip("/") in t for p in PROTECTED_PREFIXES)
+    # 대소문자를 무시하는 파일 시스템에서 다른 표기로 같은 파일을 가리키는 경우
+    try:
+        target = (root / rel)
+        if target.exists():
+            for cand in PROTECTED_CANDIDATES:
+                c = root / cand
+                if c.exists() and os.path.samefile(c, target):
+                    return True
+    except OSError:
+        pass
+    return False
 
 
-def glob_match(path: str, pattern: str) -> bool:
-    """'*' 는 '/' 를 넘지 않고, '**' 는 넘는다."""
-    rx = ""
-    i = 0
-    while i < len(pattern):
-        if pattern.startswith("**/", i):
-            rx += "(?:.*/)?"
-            i += 3
-        elif pattern.startswith("**", i):
-            rx += ".*"
-            i += 2
-        elif pattern[i] == "*":
-            rx += "[^/]*"
-            i += 1
-        elif pattern[i] == "?":
-            rx += "[^/]"
-            i += 1
+def expand_braces(tok: str) -> list[str]:
+    m = re.search(r"\{([^{}]*,[^{}]*)\}", tok)
+    if not m:
+        return [tok]
+    out: list[str] = []
+    for alt in m.group(1).split(","):
+        out += expand_braces(tok[: m.start()] + alt + tok[m.end():])
+    return out[:64]
+
+
+def token_paths(tok: str) -> list[str]:
+    """토큰에 들어 있을 수 있는 경로 조각: '--opt=값'의 값, 중괄호 전개 결과."""
+    vals = [tok]
+    if tok.startswith("-") and "=" in tok:
+        vals.append(tok.split("=", 1)[1])
+    out: list[str] = []
+    for v in vals:
+        out += expand_braces(v)
+    return out
+
+
+def token_hits(tok: str, root: Path, candidates: tuple[str, ...] = PROTECTED_CANDIDATES,
+               substring: bool = True) -> bool:
+    """토큰이 보호 경로를 가리키는가. 글자 그대로의 언급, 글롭 패턴, 대소문자 변형을 모두 본다."""
+    root_n = norm(str(root))
+    for t in token_paths(tok):
+        n = norm(t)
+        s = re.sub(r"^(?:\./)+", "", n)          # 앞의 "./" 만 떼어 낸다 (".claude" 의 점은 남김)
+        if substring:
+            if any(b in n for b in PROTECTED_BASENAMES):
+                return True
+            if any(p.casefold().rstrip("/") in n for p in PROTECTED_PREFIXES):
+                return True
         else:
-            rx += re.escape(pattern[i])
-            i += 1
-    return re.fullmatch(rx, path) is not None
-
-
-def is_frontend(rel: str, w: dict) -> bool:
-    p = PurePosixPath(rel)
-    if set(w["skip_dirs"]).intersection(p.parts[:-1]):
-        return False
-    suf = p.suffix.lower()
-    return suf in {s.lower() for s in w["frontend_suffixes"]} or suf in {s.lower() for s in w["template_suffixes"]}
-
-
-def frontend_snapshot(root: Path, w: dict) -> dict[str, list[int]]:
-    snap: dict[str, list[int]] = {}
-    skip = set(w["skip_dirs"])
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in skip]
-        for fn in filenames:
-            full = Path(dirpath) / fn
-            rel = full.relative_to(root).as_posix()
-            if is_frontend(rel, w):
-                try:
-                    st = full.stat()
-                    snap[rel] = [st.st_mtime_ns, st.st_size]
-                except OSError:
-                    pass
-    return snap
+            if any(s == c.casefold() or s.endswith("/" + c.casefold()) for c in candidates):
+                return True
+        if GLOB_META & set(t):
+            for c in candidates:
+                cn = c.casefold()
+                if "/" not in s:
+                    # 슬래시 없는 패턴은 현재 폴더(루트)의 이름만 가리킨다
+                    if "/" not in cn and fnmatch.fnmatchcase(cn, s):
+                        return True
+                elif fnmatch.fnmatchcase(cn, s) or fnmatch.fnmatchcase(f"{root_n}/{cn}", s) \
+                        or fnmatch.fnmatchcase(f"x/{cn}", s):
+                    return True
+            try:
+                base = t if os.path.isabs(t) else str(root / t)
+                for hit in _glob.glob(base, recursive=True)[:200]:
+                    if is_protected_path(root, hit) if substring else any(
+                            rel_posix(root, hit) == c for c in candidates):
+                        return True
+            except (OSError, re.error):
+                return True   # 전개할 수 없는 패턴은 막는 쪽으로
+    return False
 
 
 # ── 셸 명령 해석 ──────────────────────────────────────────────────────
@@ -243,10 +305,11 @@ class ParseError(Exception):
 
 
 def split_commands(cmd: str, depth: int = 0) -> list[SimpleCmd]:
-    """셸 명령을 단순 명령 목록으로. 따옴표·연산자·리다이렉트·bash -c·npx -c 를 다룬다."""
+    """셸 명령을 단순 명령 목록으로. 따옴표·연산자·리다이렉트·명령/프로세스 치환·bash -c 를 다룬다."""
     if depth > 4:
         raise ParseError("중첩이 너무 깊습니다")
-    text = cmd.replace("\\\r\n", " ").replace("\\\n", " ").replace("`", " ; ").replace("\r\n", "\n").replace("\n", " ; ")
+    text = (cmd.replace("\\\r\n", " ").replace("\\\n", " ").replace("`", " ; ")
+            .replace("\r\n", "\n").replace("\n", " ; "))
     lex = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     try:
@@ -258,19 +321,19 @@ def split_commands(cmd: str, depth: int = 0) -> list[SimpleCmd]:
     redirects: list[str] = []
     expect_redirect = False
     for tok in tokens:
-        if tok and set(tok) <= set(";&|()"):
-            if cur or redirects:
-                out.extend(_finish(cur, redirects, depth))
-            cur, redirects, expect_redirect = [], [], False
-            continue
-        if tok and set(tok) <= set("<>&") and (">" in tok or "<" in tok):
-            expect_redirect = ">" in tok
+        if tok and set(tok) <= set(";&|()<>"):
+            if "(" in tok or ")" in tok or set(tok) & set(";|") or tok in ("&", "&&"):
+                if cur or redirects:
+                    out.extend(_finish(cur, redirects, depth))
+                cur, redirects, expect_redirect = [], [], False
+                continue
+            expect_redirect = ">" in tok      # > >> &> >| 는 쓰기 대상, < 는 읽기
             continue
         if expect_redirect:
             redirects.append(tok)
             expect_redirect = False
             continue
-        if tok == "$":          # "$(" 의 앞부분 — 괄호 안은 별도 명령으로 나뉜다
+        if tok == "$":
             continue
         cur.append(tok)
     if cur or redirects:
@@ -292,7 +355,7 @@ def _finish(tokens: list[str], redirects: list[str], depth: int) -> list[SimpleC
         if base in WRAPPERS:
             i += 1
             if base == "timeout" and i < len(tokens) and not tokens[i].startswith("-"):
-                i += 1  # timeout 의 시간 인자
+                i += 1
             while i < len(tokens) and tokens[i].startswith("-"):
                 if tokens[i] in ("-S", "--split-string") and i + 1 < len(tokens):
                     return [SimpleCmd([], assigns, redirects)] + split_commands(tokens[i + 1], depth + 1)
@@ -303,187 +366,96 @@ def _finish(tokens: list[str], redirects: list[str], depth: int) -> list[SimpleC
         break
     argv = tokens[i:]
     result = [SimpleCmd(argv, assigns, redirects)]
-    # 따옴표 안의 명령 치환 "$(…)" 과 `…` (앞에서 ' ; ' 로 바뀐 것)
-    for t in tokens:
-        for m in re.finditer(r"\$\((.*)\)", t, re.S):
+    for t in tokens + redirects:
+        for m in re.finditer(r"[$<>]\((.*)\)", t, re.S):
             result += split_commands(m.group(1), depth + 1)
         if " ; " in t:
             result += split_commands(t, depth + 1)
     if argv and argv[0].rsplit("/", 1)[-1] in SHELLS:
         for j, a in enumerate(argv[1:], 1):
-            if a == "-c" or (a.startswith("-") and "c" in a[1:] and not a.startswith("--")):
+            if a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]):
                 if j + 1 < len(argv):
                     result += split_commands(argv[j + 1], depth + 1)
                 break
-    if argv and argv[0] == "eval":
-        result += split_commands(" ".join(argv[1:]), depth + 1)
+    if argv and argv[0] in ("eval", "source", "."):
+        result += split_commands(" ".join(argv[1:]), depth + 1) if argv[0] == "eval" else []
     return result
 
 
-@dataclass
-class MwgCall:
-    version: str | None      # None = 생략
-    sub: str | None          # 첫 위치 인자 (하위 명령)
-    args: list[str]          # 하위 명령 뒤 인자
-    telemetry_off: bool
-    direct: bool = False     # 패키지 실행기 없이 바이너리·파일을 직접 실행
-    install: bool = False    # npm install 등
-
-
-def _pkg_spec(tok: str) -> tuple[bool, str | None]:
-    """'modern-web-guidance@1.0.0' → (True, '1.0.0'). 패키지가 아니면 (False, None)."""
+def _pkg_spec(tok: str) -> bool:
     t = tok.strip()
-    if t == PKG:
-        return True, None
-    if t.startswith(PKG + "@"):
-        return True, t[len(PKG) + 1:]
-    return False, None
+    return t == PKG or t.startswith(PKG + "@")
 
 
-def _sub_and_args(rest: list[str]) -> tuple[str | None, list[str]]:
-    i = 0
-    while i < len(rest):
-        a = rest[i]
-        if a == "--":
-            return (rest[i + 1], rest[i + 2:]) if i + 1 < len(rest) else (None, [])
-        if a.startswith("-"):
-            if "=" not in a and a in VALUE_OPTIONS:
-                i += 1
-            i += 1
-            continue
-        return a, rest[i + 1:]
-    return None, []
-
-
-def find_mwg_calls(cmd: str, hook_env_telemetry_off: bool) -> list[MwgCall]:
-    calls: list[MwgCall] = []
+def mwg_direct_calls(cmd: str) -> list[str]:
+    """npx·npm·node 등으로 MWG 를 직접 부르는 단순 명령 목록 (모두 금지 — 래퍼만 허용)."""
+    hits: list[str] = []
     for sc in split_commands(cmd):
         if not sc.argv:
             continue
-        before = len(calls)
-        _calls_for(sc, hook_env_telemetry_off, calls)
-        # fail-closed: 실행 명령에 패키지 이름이 있는데 정상 호출로 해석되지 않았다
-        if len(calls) == before and sc.argv[0].rsplit("/", 1)[-1] not in MENTION_OK \
-                and any(PKG in t for t in sc.argv):
-            calls.append(MwgCall(None, None, sc.argv, False, direct=True))
-    return calls
-
-
-def _calls_for(sc: SimpleCmd, hook_env_telemetry_off: bool, calls: list[MwgCall]) -> None:
-    for _ in (0,):
-        tel = sc.assigns.get("DISABLE_TELEMETRY") == "1" or hook_env_telemetry_off
         exe = sc.argv[0].rsplit("/", 1)[-1]
         args = sc.argv[1:]
-        # 바이너리·CLI 파일 직접 실행
-        if exe == PKG or any("modern-web.mjs" in a for a in sc.argv[:3]):
-            calls.append(MwgCall(None, None, args, tel, direct=True))
-            continue
-        runner_args: list[str] | None = None
-        if exe in ("npx", "pnpx", "bunx"):
-            runner_args = args
-        elif exe in ("npm", "pnpm", "yarn", "bun") and args:
-            if args[0] in ("exec", "x", "dlx"):
-                runner_args = args[1:]
-            elif args[0] in ("i", "install", "add", "ci", "update", "up", "upgrade", "link") and any(_pkg_spec(a)[0] for a in args[1:]):
-                calls.append(MwgCall(None, None, args, tel, install=True))
-                continue
-        if runner_args is None:
-            continue
-        pkg_version: str | None = None
-        found = False
-        i = 0
-        while i < len(runner_args):
-            a = runner_args[i]
-            if a in ("-c", "--call") and i + 1 < len(runner_args):
-                for inner in find_mwg_calls(runner_args[i + 1], tel):
-                    calls.append(inner)
-                i += 2
-                continue
-            if a.startswith("--package=") or a in ("-p", "--package"):
-                val = a.split("=", 1)[1] if "=" in a else (runner_args[i + 1] if i + 1 < len(runner_args) else "")
-                ok, ver = _pkg_spec(val)
-                if ok:
-                    found, pkg_version = True, ver
-                i += 1 if "=" in a else 2
-                continue
-            if a == "--":
-                i += 1
-                continue
-            if a.startswith("-"):
-                i += 1
-                continue
-            ok, ver = _pkg_spec(a)
-            if ok:
-                found, pkg_version = True, ver
-                sub, rest = _sub_and_args(runner_args[i + 1:])
-                calls.append(MwgCall(pkg_version, sub, rest, tel))
-            elif found and a == PKG:  # --package=… 뒤 bin 이름
-                sub, rest = _sub_and_args(runner_args[i + 1:])
-                calls.append(MwgCall(pkg_version, sub, rest, tel))
-            elif found:
-                calls.append(MwgCall(pkg_version, None, runner_args[i:], tel, direct=True))
-            break
+        joined = " ".join(sc.argv)
+        if exe == PKG or any("modern-web.mjs" in a for a in sc.argv):
+            hits.append(joined)
+        elif exe in ("npx", "pnpx", "bunx") or (exe in ("npm", "pnpm", "yarn", "bun") and args):
+            if any(_pkg_spec(a) or (a.startswith("--package=") and _pkg_spec(a.split("=", 1)[1])) for a in sc.argv):
+                hits.append(joined)
+            else:
+                for j, a in enumerate(args):
+                    if a in ("-c", "--call") and j + 1 < len(args):
+                        hits += mwg_direct_calls(args[j + 1])
+        elif exe not in MENTION_OK and any(PKG in t for t in sc.argv):
+            hits.append(joined)   # fail-closed: 실행 명령에 패키지 이름이 있는데 해석되지 않음
+    return hits
 
 
-def check_mwg_calls(cmd: str, w: dict) -> str | None:
-    """에이전트의 Bash 명령 중 MWG 호출을 검사. 막을 이유가 있으면 메시지를 돌려준다 (R17·텔레메트리)."""
-    pinned = w["mwg_version"]
-    env_off = os.environ.get("DISABLE_TELEMETRY") == "1"
+def check_mwg_calls(cmd: str) -> str | None:
     try:
-        calls = find_mwg_calls(cmd, env_off)
+        hits = mwg_direct_calls(cmd)
     except ParseError:
-        if PKG in cmd:
-            return "명령을 해석할 수 없어 Modern Web Guidance 호출을 확인하지 못했습니다 (R17). 따옴표를 닫고 단순한 형태로 다시 실행하세요."
-        return None
-    good = f"DISABLE_TELEMETRY=1 npx -y {PKG}@{pinned} <search|retrieve|list> …"
-    for c in calls:
-        if c.install:
-            return f"{PKG} 를 설치하는 명령은 사람이 실행합니다 (R17). 이 프로젝트는 npx 고정 버전으로만 씁니다: {good}"
-        if c.direct:
-            return f"{PKG} 를 직접 실행할 수 없습니다 (R17). 고정 버전으로 실행하세요: {good}"
-        if c.version != pinned:
-            got = f"@{c.version}" if c.version else "버전 생략"
-            return f"{PKG} 는 hold.toml [web].mwg_version = {pinned} 으로 고정되어 있습니다 ({got}, R17). {good}"
-        if c.sub not in ALLOWED_SUBCOMMANDS:
-            what = f"'{c.sub}'" if c.sub else "하위 명령 없음"
-            return (f"{PKG} 에서 에이전트가 쓸 수 있는 하위 명령은 search, retrieve, list, legacy-scan 뿐입니다 ({what}, R17). "
-                    "정책·설정·버전을 바꾸는 명령(set-baseline, set-allow-*, install, update 등)은 사람이 hold.toml 과 sync.py 로 합니다.")
-        if not w["telemetry"] and not c.telemetry_off:
-            return f"텔레메트리를 끈 프로젝트입니다. 명령 앞에 DISABLE_TELEMETRY=1 을 붙이세요: {good}"
+        return ("명령을 해석할 수 없어 Modern Web Guidance 호출 여부를 확인하지 못했습니다 (R17). 따옴표를 닫고 단순한 형태로 다시 실행하세요."
+                if PKG in cmd or "modern-web.mjs" in cmd else None)
+    if hits:
+        return (f"이 프로젝트는 Modern Web Guidance 를 래퍼로만 씁니다 (R17): python {WRAPPER} <search|retrieve|list> …\n"
+                "래퍼가 검증된 고정 사본을 텔레메트리 없이 실행합니다. npx·npm·node 로 직접 부르지 마세요.")
     return None
 
 
 def check_bash_protected(cmd: str, root: Path) -> str | None:
-    """확장 보호 경로를 건드리는 Bash 명령인지. 읽기 전용 명령과 검사 스크립트만 허용한다."""
+    """보호 경로를 건드리는 Bash 명령인지. 읽기 전용 명령과 허락된 스크립트 실행만 허용한다."""
     try:
         cmds = split_commands(cmd)
     except ParseError:
-        if any(token_mentions_protected(t) for t in [cmd]):
-            return "명령을 해석할 수 없는데 웹 확장 보호 경로가 들어 있습니다."
-        return None
+        return "명령을 해석할 수 없는데 웹 확장 보호 경로가 들어 있습니다." if token_hits(cmd, root) else None
     for sc in cmds:
-        tokens = sc.argv + list(sc.assigns.values())
-        for t in sc.argv:
-            if any(t.replace("\\", "/").endswith(s) for s in HUMAN_ONLY_SCRIPTS):
+        argv = sc.argv
+        for t in argv:
+            if token_hits(t, root, HUMAN_ONLY, substring=False):
                 return f"{t} 는 사람이 실행하는 스크립트입니다 (R17). 버전·정책을 바꿔야 한다고 판단되면 멈추고 보고하세요."
-        if any(token_mentions_protected(r) for r in sc.redirects):
+        if argv and argv[0].rsplit("/", 1)[-1] == "git":
+            low = [a.casefold() for a in argv]
+            if "--no-verify" in low or ("commit" in low and "-n" in argv) or any("core.hookspath" in a for a in low):
+                return "pre-commit 검사를 건너뛰는 git 옵션입니다 (--no-verify, core.hooksPath). 검사가 실패하면 고치거나 사람에게 보고하세요."
+        if any(token_hits(r, root) for r in sc.redirects):
             return "웹 확장 보호 경로에 리다이렉트로 쓸 수 없습니다."
-        refs = [t for t in tokens if token_mentions_protected(t)]
-        if not refs or not sc.argv:
+        refs = [t for t in argv + list(sc.assigns.values()) if token_hits(t, root)]
+        if not refs or not argv:
             continue
-        exe = sc.argv[0].rsplit("/", 1)[-1]
-        if exe in READONLY_COMMANDS and not any(a in ("-i", "--in-place") for a in sc.argv[1:]):
+        exe = argv[0].rsplit("/", 1)[-1]
+        if exe in READONLY_COMMANDS and not any(a in ("-i", "--in-place") or a.startswith("--in-place") for a in argv[1:]):
             continue
-        if exe == "git" and len(sc.argv) > 1 and sc.argv[1] in READONLY_GIT:
+        if exe == "git" and len(argv) > 1 and argv[1] in READONLY_GIT \
+                and not any(a == o or a.startswith(o + "=") for a in argv[2:] for o in GIT_WRITE_OPTS):
             continue
-        if exe.startswith("python") and len(sc.argv) > 1 and any(sc.argv[1].replace("\\", "/").endswith(s) for s in READONLY_ALLOWED_SCRIPTS):
-            if all(not token_mentions_protected(t) or t == sc.argv[1] for t in tokens):
+        if exe.startswith("python") and len(argv) > 1 and token_hits(argv[1], root, AGENT_SCRIPTS, substring=False):
+            if all(t == argv[1] or not token_hits(t, root) for t in argv + list(sc.assigns.values())):
                 continue
         return f"웹 확장 보호 경로({refs[0]})를 건드리는 명령입니다. 읽기는 cat·grep 등으로만 하세요."
     return None
 
 
-# ── 고정 버전 생성물 (sync 와 web_check 가 같은 함수를 씀) ─────────────
+# ── 검증된 패키지 사본 ───────────────────────────────────────────────
 
 MEMBERS = {
     "package": "package/package.json",
@@ -492,33 +464,54 @@ MEMBERS = {
     "guides": "package/skills/modern-web-guidance/gen/guides.json",
     "license": "package/LICENSE",
 }
+CLI_REL = "skills/modern-web-guidance/modern-web.mjs"
 
 
 class SyncError(Exception):
     pass
 
 
-def sri(data: bytes) -> str:
-    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
-
-
-def sha256(data: bytes) -> str:
-    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
-
-
-def read_tarball(data: bytes) -> dict[str, str]:
-    import io
-    out: dict[str, str] = {}
+def tar_files(data: bytes) -> dict[str, bytes]:
+    """tarball 의 'package/' 아래 일반 파일만 (경로 → 내용). 링크·절대 경로·'..'는 거부."""
+    out: dict[str, bytes] = {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        for key, name in MEMBERS.items():
-            try:
-                fh = tf.extractfile(name)
-            except KeyError:
-                fh = None
-            if fh is None:
-                raise SyncError(f"패키지에 {name} 이(가) 없습니다. MWG 패키지 구조가 바뀌었을 수 있습니다")
-            out[key] = fh.read().decode("utf-8")
+        for m in tf.getmembers():
+            if m.isdir():
+                continue
+            name = m.name
+            if not m.isfile() or name.startswith("/") or ".." in PurePosixPath(name).parts or not name.startswith("package/"):
+                raise SyncError(f"패키지에 허용하지 않는 항목이 있습니다: {name}")
+            fh = tf.extractfile(m)
+            out[name[len("package/"):]] = fh.read() if fh else b""
     return out
+
+
+def tree_hash(files: dict[str, bytes]) -> str:
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(rel.encode() + b"\0" + sha256_raw(files[rel]).encode() + b"\n")
+    return h.hexdigest()
+
+
+def dir_files(d: Path) -> dict[str, bytes]:
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in d.rglob("*") if p.is_file()}
+
+
+def members(files: dict[str, bytes]) -> dict[str, str]:
+    out = {}
+    for key, name in MEMBERS.items():
+        rel = name[len("package/"):]
+        if rel not in files:
+            raise SyncError(f"패키지에 {name} 이(가) 없습니다. MWG 패키지 구조가 바뀌었을 수 있습니다")
+        out[key] = files[rel].decode("utf-8")
+    if CLI_REL not in files:
+        raise SyncError(f"패키지에 {CLI_REL} 이(가) 없습니다")
+    return out
+
+
+def pkg_paths(root: Path, w: dict) -> tuple[Path, Path]:
+    base = root / PKG_STORE
+    return base / f"{PKG}-{w['mwg_version']}.tgz", base / w["mwg_version"]
 
 
 def npm_pack(version: str, dest: Path, offline: bool) -> Path | None:
@@ -527,7 +520,7 @@ def npm_pack(version: str, dest: Path, offline: bool) -> Path | None:
         return None
     cmd = [npm, "pack", f"{PKG}@{version}", "--pack-destination", str(dest)] + (["--offline"] if offline else [])
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
         return None
     if res.returncode != 0:
@@ -536,7 +529,7 @@ def npm_pack(version: str, dest: Path, offline: bool) -> Path | None:
     return found[-1] if found else None
 
 
-def obtain_tarball(w: dict, tarball: Path | None, offline_only: bool) -> bytes | None:
+def fetch(w: dict, tarball: Path | None, offline_only: bool = False) -> bytes | None:
     if tarball:
         return tarball.read_bytes()
     with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +538,54 @@ def obtain_tarball(w: dict, tarball: Path | None, offline_only: bool) -> bytes |
             p = npm_pack(w["mwg_version"], Path(tmp), offline=False)
         return p.read_bytes() if p else None
 
+
+def store_package(root: Path, w: dict, data: bytes) -> str:
+    """무결성을 확인한 tarball 과 풀린 사본을 PKG_STORE 에 둔다. 트리 해시를 돌려준다."""
+    if sri(data) != w["mwg_integrity"]:
+        raise SyncError("패키지의 무결성 값이 hold.toml 의 mwg_integrity 와 다릅니다. 멈춥니다")
+    files = tar_files(data)
+    tgz, d = pkg_paths(root, w)
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    for rel, b in files.items():
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b)
+    tgz.write_bytes(data)
+    return tree_hash(files)
+
+
+def verify_package(root: Path, w: dict, lock: dict | None = None) -> tuple[Path | None, str | None]:
+    """실행 전에 사본을 확인한다. (CLI 경로, 오류)."""
+    tgz, d = pkg_paths(root, w)
+    if not d.exists() or not tgz.exists():
+        return None, f"검증된 MWG 사본이 없습니다 ({PKG_STORE}/). 사람이 python {EXT_DIR}/sync.py 를 실행하세요"
+    if lock is None:
+        try:
+            lock = json.loads((root / LOCK_PATH).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, f"{LOCK_PATH} 를 읽을 수 없습니다. 사람이 sync.py 를 실행하세요"
+    if lock.get("mwg_integrity") != w["mwg_integrity"] or lock.get("mwg_version") != w["mwg_version"]:
+        return None, "lock.json 의 고정 버전·무결성 값이 hold.toml 과 다릅니다. 사람이 sync.py 를 실행하세요"
+    if tree_hash(dir_files(d)) != lock.get("pkg_tree"):
+        return None, f"MWG 사본({PKG_STORE}/{w['mwg_version']})이 검증한 내용과 다릅니다. 사람이 sync.py 로 다시 설치하세요"
+    return d / CLI_REL, None
+
+
+def node_command(cli: Path, args: list[str]) -> list[str] | None:
+    node = shutil.which("node")
+    return [node, str(cli), *args] if node else None
+
+
+def mwg_env(w: dict) -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in ("NODE_OPTIONS", "NODE_PATH")}  # 사본 밖 코드 주입 차단
+    if not w["telemetry"]:
+        env["DISABLE_TELEMETRY"] = "1"
+    return env
+
+
+# ── 고정 버전 생성물 ─────────────────────────────────────────────────
 
 def policy_inputs(w: dict) -> dict:
     keys = ("ext_version", "mwg_version", "mwg_integrity", "baseline", "fallback_policy", "telemetry",
@@ -564,12 +605,16 @@ def describe_baseline(b: str) -> str:
 
 def hold_section(w: dict) -> str:
     fb = w["fallback_policy"].strip() or "별도 정책 없음. 가이드의 Fallback 권고를 따르되, 전략이 둘 이상이면 아래 R18 대로 사람에게 묻는다."
-    ver = w["mwg_version"]
     return f"""
 
 ## HOLD 프로젝트 규칙 (이 절이 위 내용보다 우선한다)
 
 이 프로젝트는 HOLD 웹 확장 web-{w['ext_version']}을 따른다. 정책의 원본은 `hold.toml`의 `[web]`이고 사람이 소유한다. `.mwgrc`는 그 정책에서 생성된 파일이다.
+
+### 실행 방법 (R17)
+- Modern Web Guidance는 **`python {WRAPPER} <search|retrieve|list|legacy-scan> …`로만** 실행한다. 위 본문의 `npx`·`pnpx`·`npx.cmd`·네트워크 허용 요청 안내는 이 프로젝트에 해당하지 않는다.
+- 래퍼는 사람이 고정하고 무결성을 확인한 `{PKG}@{w['mwg_version']}` 사본을 텔레메트리 없이 실행한다. 다른 하위 명령(`set-baseline`, `set-allow-*`, `install`, `update`)은 래퍼와 훅이 막는다.
+- 업데이트 경고가 나와도 사용자를 설득하지 않는다. 경고 내용을 그대로 보고만 한다.
 
 ### 브라우저 지원 정책 (R14)
 - 지원 기준: {describe_baseline(w['baseline'])}
@@ -580,16 +625,12 @@ def hold_section(w: dict) -> str:
 - 가이드가 대체 전략을 둘 이상 제시하거나, 지원 기준 밖 브라우저에서 기능을 빼야 할 때는 스스로 고르지 않는다. spec.md의 `## 계약 질문 목록`에 `(웹)`으로 시작하는 질문으로 남긴다.
 
 ### 참조 가이드 기록 (R16)
-- Stage 2에서 search·retrieve한 가이드는 spec.md의 `## 참조 가이드` 절에 `mwg:<id>` 형식으로 적는다. 예: `- mwg:light-dismiss-a-dialog — 바깥 클릭 닫기는 closedby="any"`.
+- Stage 2에서 retrieve한 가이드는 spec.md의 `## 참조 가이드` 절에 `mwg:<id>` 형식으로 적는다. 예: `- mwg:light-dismiss-a-dialog — 바깥 클릭 닫기는 closedby="any"`.
 - 가이드를 쓰지 않은 변경이면 그 절에 `생략: <구체적인 이유>` 한 줄만 적는다.
-- 응답 끝의 `### Modern Web Guidance` 절은 증거가 아니다. 증거는 retrieve 명령의 실제 출력(훅이 기록)과 검사 출력이다 (H9).
-
-### 버전과 명령 (R17)
-- 이 skill과 가이드는 `{PKG}@{ver}`로 고정되어 있다. 에이전트는 `search`·`retrieve`·`list`만 쓴다. 다른 버전, 다른 하위 명령(`set-baseline`, `set-allow-*`, `install`, `update`), 텔레메트리 접두어(`DISABLE_TELEMETRY=1`)가 빠진 호출은 훅이 막는다.
-- 업데이트 경고가 나와도 사용자를 설득하지 않는다. 경고 내용을 그대로 보고만 한다.
+- 응답 끝의 `### Modern Web Guidance` 절은 증거가 아니다. 증거는 래퍼가 기록한 retrieve 출력과 검사 출력이다 (H9).
 
 ### 레거시 패턴 검사 (R15)
-- 프런트엔드 파일을 고치면(편집 도구든 Bash든) 훅이 `legacy-scan`을 고정 버전으로 돌린다. 직접 돌리지 않아도 된다.
+- 프런트엔드 파일이 바뀌면(편집 도구든 Bash든) 훅이 고정 사본으로 레거시 검사를 한다. 직접 돌리지 않아도 된다.
 - 검출이 오탐이라고 판단되면 코드를 비틀지 말고 멈춰서 보고한다. 받아들일 검출은 사람이 `hold.toml`의 `[web].legacy_allow`에 적는다.
 
 ### 범위
@@ -597,57 +638,129 @@ def hold_section(w: dict) -> str:
 """
 
 
+RUNNER_FORMS = re.compile(r"(?:DISABLE_TELEMETRY=1 )?(?:npx -y |pnpx |npx )" + re.escape(PKG) + r"@latest")
+
+
 def transform_skill(text: str, w: dict, skill_version: str) -> str:
-    latest = f"{PKG}@latest"
-    if text.count(latest) == 0:
-        raise SyncError(f"MWG SKILL.md 에서 '{latest}' 를 찾지 못했습니다. 원본 형식이 바뀌었을 수 있습니다")
-    ver = w["mwg_version"]
-    out = text.replace(latest, f"{PKG}@{ver}")
-    if not w["telemetry"]:
-        out = re.sub(r"(?<!DISABLE_TELEMETRY=1 )\b(npx -y |pnpx )(" + re.escape(PKG) + r"@)", r"DISABLE_TELEMETRY=1 \1\2", out)
-    notice = (f"<!-- hold-web: sync.py 가 {PKG}@{ver} (skill {skill_version}, {w['mwg_integrity'][:20]}…) 에서 생성. "
-              "원본: Google LLC, Apache-2.0 (같은 폴더의 LICENSE). 변경: 버전 고정"
-              + (", 텔레메트리 끔" if not w["telemetry"] else "")
-              + ", 'HOLD 프로젝트 규칙' 절 추가. 보호 경로 — 손으로 고치지 마세요. -->\n")
+    n = len(RUNNER_FORMS.findall(text))
+    if n == 0:
+        raise SyncError(f"MWG SKILL.md 에서 '{PKG}@latest' 실행 명령을 찾지 못했습니다. 원본 형식이 바뀌었을 수 있습니다")
+    out = RUNNER_FORMS.sub(f"python {WRAPPER}", text)
+    if f"{PKG}@latest" in out:
+        raise SyncError(f"MWG SKILL.md 에 바꾸지 못한 '{PKG}@latest' 형식이 남았습니다. 원본 형식이 바뀌었을 수 있습니다")
+    notice = (f"<!-- hold-web: sync.py 가 {PKG}@{w['mwg_version']} (skill {skill_version}, {w['mwg_integrity'][:20]}…) 에서 생성. "
+              f"원본: Google LLC, Apache-2.0 (같은 폴더의 LICENSE). 변경: 실행 명령을 래퍼({WRAPPER})로, "
+              "'HOLD 프로젝트 규칙' 절 추가. 보호 경로 — 손으로 고치지 마세요. -->\n")
     m = re.match(r"^---\n.*?\n---\n", out, re.S)
     out = (out[: m.end()] + "\n" + notice + out[m.end():]) if m else notice + out
     return out.rstrip("\n") + hold_section(w)
 
 
-def render(members: dict[str, str], w: dict) -> dict[str, bytes]:
-    """tarball 내용과 [web] 정책에서 생성물 전부를 만든다. 결정적(같은 입력 → 같은 바이트)."""
-    pkg_ver = json.loads(members["package"]).get("version")
+def render(files: dict[str, bytes], w: dict) -> dict[str, bytes]:
+    """패키지 내용과 [web] 정책에서 생성물 전부를 만든다. 결정적."""
+    m = members(files)
+    pkg_ver = json.loads(m["package"]).get("version")
     if pkg_ver != w["mwg_version"]:
         raise SyncError(f"패키지 버전 {pkg_ver} 이(가) hold.toml 의 mwg_version {w['mwg_version']} 과 다릅니다")
-    skill_version = members["skill_version"].strip()
-    guides = [g for g in json.loads(members["guides"]) if isinstance(g, dict) and g.get("id")]
+    skill_version = m["skill_version"].strip()
+    guides = [g for g in json.loads(m["guides"]) if isinstance(g, dict) and g.get("id")]
     if not guides:
         raise SyncError("가이드 목록이 비어 있습니다")
-    index = {
-        "mwg_version": w["mwg_version"],
-        "skill_version": skill_version,
-        "count": len(guides),
-        "guides": [{"id": g["id"], "category": g.get("category", ""), "description": g.get("description", "")}
-                   for g in sorted(guides, key=lambda g: g["id"])],
-    }
+    index = {"mwg_version": w["mwg_version"], "skill_version": skill_version, "count": len(guides),
+             "guides": [{"id": g["id"], "category": g.get("category", ""), "description": g.get("description", "")}
+                        for g in sorted(guides, key=lambda g: g["id"])]}
     mwgrc = {"baseline": w["baseline"], "allowOriginTrials": w["allow_origin_trials"],
              "allowVolatileFeatures": w["allow_volatile_features"]}
-    files = {
-        SKILL_PATH: transform_skill(members["skill"], w, skill_version).encode("utf-8"),
-        LICENSE_PATH: members["license"].encode("utf-8"),
+    out = {
+        SKILL_PATH: transform_skill(m["skill"], w, skill_version).encode("utf-8"),
+        LICENSE_PATH: m["license"].encode("utf-8"),
         GUIDES_PATH: (json.dumps(index, ensure_ascii=False, indent=1) + "\n").encode("utf-8"),
         MWGRC_PATH: (json.dumps(mwgrc, indent=2) + "\n").encode("utf-8"),
     }
-    lock = {
-        "generated_by": f"hold-web {EXT_VERSION} sync.py",
-        "mwg_version": w["mwg_version"],
-        "mwg_integrity": w["mwg_integrity"],
-        "skill_version": skill_version,
-        "policy": policy_inputs(w),
-        "files": {p: sha256(b) for p, b in sorted(files.items())},
-    }
-    files[LOCK_PATH] = (json.dumps(lock, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
-    return files
+    lock = {"generated_by": f"hold-web {EXT_VERSION} sync.py", "mwg_version": w["mwg_version"],
+            "mwg_integrity": w["mwg_integrity"], "skill_version": skill_version, "pkg_tree": tree_hash(files),
+            "policy": policy_inputs(w), "files": {p: sha256(b) for p, b in sorted(out.items())}}
+    out[LOCK_PATH] = (json.dumps(lock, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+    return out
+
+
+def skill_version_of(root: Path, w: dict) -> str:
+    _, d = pkg_paths(root, w)
+    try:
+        return (d / "skills/modern-web-guidance/skill-version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+# ── 스냅샷 (바뀐 파일 찾기) ──────────────────────────────────────────
+
+def is_frontend(rel: str, w: dict) -> bool:
+    p = PurePosixPath(rel)
+    if set(w["skip_dirs"]).intersection(p.parts[:-1]):
+        return False
+    suf = p.suffix.lower()
+    return suf in {s.lower() for s in w["frontend_suffixes"]} or suf in {s.lower() for s in w["template_suffixes"]}
+
+
+def is_change_doc(rel: str, cfg: dict) -> bool:
+    changes = (cfg.get("paths", {}).get("changes") or "changes").rstrip("/")
+    parts = rel.split("/")
+    return len(parts) >= 3 and parts[0] == changes and rel.endswith(".md") and not parts[1].startswith("_")
+
+
+def snapshot(root: Path, w: dict, cfg: dict, prev: dict | None = None) -> dict[str, list]:
+    """프런트엔드 파일과 changes/ 산출물의 (mtime, ctime, 크기, 내용 해시). 메타데이터가 같으면 이전 해시를 재사용."""
+    prev = prev or {}
+    snap: dict[str, list] = {}
+    skip = set(w["skip_dirs"])
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            full = Path(dirpath) / fn
+            rel = full.relative_to(root).as_posix()
+            if not (is_frontend(rel, w) or is_change_doc(rel, cfg)):
+                continue
+            try:
+                st = full.stat()
+            except OSError:
+                continue
+            meta = [st.st_mtime_ns, st.st_ctime_ns, st.st_size]
+            old = prev.get(rel)
+            if old and old[:3] == meta:
+                snap[rel] = old
+                continue
+            digest = ""
+            if st.st_size <= HASH_LIMIT:
+                try:
+                    digest = hashlib.sha1(full.read_bytes()).hexdigest()
+                except OSError:
+                    pass
+            snap[rel] = meta + [digest]
+    return snap
+
+
+def changed_files(root: Path, w: dict, cfg: dict) -> list[str] | None:
+    """지난 훅 이후 바뀐 파일. 처음이면 기준만 남기고 None."""
+    f = root / SNAP_FILE
+    prev = None
+    if f.exists():
+        try:
+            prev = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            prev = None
+    cur = snapshot(root, w, cfg, prev)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(cur, ensure_ascii=True), encoding="utf-8")
+    if prev is None:
+        return None
+
+    def differs(old: list | None, new: list) -> bool:
+        if not old:
+            return True
+        if new[3] or old[3]:
+            return old[3] != new[3]          # 내용 해시로 판단 (mtime 을 되돌려도 잡힘)
+        return old[:3] != new[:3]            # 큰 파일: ctime 포함 메타데이터로 판단
+    return sorted(r for r, v in cur.items() if differs(prev.get(r), v))
 
 
 # ── 레거시 패턴 검사 ──────────────────────────────────────────────────
@@ -669,38 +782,35 @@ class ScanResult:
     error: str | None = None
 
 
-def mwg_env(w: dict) -> dict:
-    env = dict(os.environ)
-    if not w["telemetry"]:
-        env["DISABLE_TELEMETRY"] = "1"
-    return env
-
-
 def scan(root: Path, w: dict, rels: list[str]) -> ScanResult:
-    """대상 파일을 임시 폴더에 복사해 한 번에 검사한다 (.gitignore·파일 이름·경로의 영향을 받지 않게)."""
+    """대상 파일을 임시 폴더에 중립 이름(f0001.js 등)으로 복사해 검증된 사본으로 한 번에 검사한다."""
     result = ScanResult()
     rels = sorted({r for r in rels if is_frontend(r, w) and (root / r).is_file()})
     if not rels:
         return result
-    npx = shutil.which("npx")
-    if not npx:
-        result.skipped = "npx 가 없어 레거시 패턴 검사를 건너뛰었습니다 (Node.js 22 이상 필요)"
+    cli, err = verify_package(root, w)
+    if err:
+        result.error = err
         return result
     tmpl = {s.lower() for s in w["template_suffixes"]}
     with tempfile.TemporaryDirectory(prefix="hold-web-scan-") as tmp:
+        src = Path(tmp) / "src"
+        src.mkdir()
         back: dict[str, str] = {}
-        for r in rels:
-            name = r + ".html" if PurePosixPath(r).suffix.lower() in tmpl else r
-            dst = Path(tmp) / "src" / name
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(root / r, dst)
+        for i, r in enumerate(rels, 1):
+            suf = PurePosixPath(r).suffix.lower()
+            name = f"f{i:04d}{'.html' if suf in tmpl else suf}"
+            shutil.copyfile(root / r, src / name)
             back[name] = r
-        cmd = [npx, "-y", f"{PKG}@{w['mwg_version']}", "legacy-scan", str(Path(tmp) / "src"), "--json"]
+        cmd = node_command(cli, ["legacy-scan", str(src), "--json"])
+        if cmd is None:
+            result.skipped = "node 가 없어 레거시 패턴 검사를 건너뛰었습니다 (Node.js 22 이상 필요)"
+            return result
         try:
             res = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, encoding="utf-8",
-                                 env=mwg_env(w), timeout=SCAN_TIMEOUT)
+                                 errors="replace", env=mwg_env(w), timeout=SCAN_TIMEOUT)
         except subprocess.TimeoutExpired:
-            result.skipped = f"legacy-scan 이 {SCAN_TIMEOUT}초 안에 끝나지 않았습니다 (오프라인이면 npm 캐시를 확인)"
+            result.skipped = f"legacy-scan 이 {SCAN_TIMEOUT}초 안에 끝나지 않았습니다"
             return result
         try:
             data = json.loads(res.stdout)
@@ -714,18 +824,31 @@ def scan(root: Path, w: dict, rels: list[str]) -> ScanResult:
         for g in data["guides"]:
             for r in g.get("rules", []):
                 for m in r.get("findings", []):
-                    raw = str(m.get("file", "")).replace("\\", "/").lstrip("./")
-                    file = back.get(raw) or back.get(raw.removeprefix("src/")) or raw
-                    result.findings.append(Finding(g.get("guideId", "?"), r.get("ruleId", "?"), file,
+                    raw = PurePosixPath(str(m.get("file", "")).replace("\\", "/")).name
+                    result.findings.append(Finding(g.get("guideId", "?"), r.get("ruleId", "?"), back.get(raw, raw),
                                                    m.get("line"), str(m.get("message", "")).strip()))
     keep: list[Finding] = []
     for f in result.findings:
-        if any(_allowed(f, e) for e in w["legacy_allow"]):
-            result.allowed.append(f)
-        else:
-            keep.append(f)
+        (result.allowed if any(_allowed(f, e) for e in w["legacy_allow"]) else keep).append(f)
     result.findings = keep
     return result
+
+
+def glob_match(path: str, pattern: str) -> bool:
+    """'*' 는 '/' 를 넘지 않고, '**' 는 넘는다."""
+    rx, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            rx, i = rx + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            rx, i = rx + ".*", i + 2
+        elif pattern[i] == "*":
+            rx, i = rx + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            rx, i = rx + "[^/]", i + 1
+        else:
+            rx, i = rx + re.escape(pattern[i]), i + 1
+    return re.fullmatch(rx, path) is not None
 
 
 def _allowed(f: Finding, entry: str) -> bool:
@@ -734,14 +857,12 @@ def _allowed(f: Finding, entry: str) -> bool:
 
 
 def format_findings(findings: list[Finding], w: dict) -> str:
-    ver = w["mwg_version"]
-    pre = "" if w["telemetry"] else "DISABLE_TELEMETRY=1 "
-    lines = [f"레거시 웹 패턴이 검출되었습니다 (R15, 고정 가이드 {PKG}@{ver})."]
+    lines = [f"레거시 웹 패턴이 검출되었습니다 (R15, 고정 가이드 {PKG}@{w['mwg_version']})."]
     by: dict[str, list[Finding]] = {}
     for f in findings:
         by.setdefault(f.guide, []).append(f)
     for guide, items in by.items():
-        lines.append(f"\n[{guide}]  가이드 읽기: {pre}npx -y {PKG}@{ver} retrieve {guide}")
+        lines.append(f"\n[{guide}]  가이드 읽기: python {WRAPPER} retrieve {guide}")
         for f in items[:5]:
             lines.append(f"  - {f.file}{':' + str(f.line) if f.line else ''} — {f.message[:200]}")
         if len(items) > 5:
@@ -751,37 +872,10 @@ def format_findings(findings: list[Finding], w: dict) -> str:
     return "\n".join(lines)
 
 
-# ── retrieve 증거 (H9) ────────────────────────────────────────────────
+# ── 기타 ─────────────────────────────────────────────────────────────
 
 GUIDE_MARK = re.compile(r"^--- Guide for ([a-z0-9][a-z0-9-]*) ---", re.M)
 SAVED_TO = re.compile(r"saved to (\S+\.md)")
-
-
-def retrieved_ids(tool_response) -> list[str]:
-    """retrieve 의 실제 출력에서 가이드 ID 를 찾는다. 출력이 파일로 저장되었으면 그 파일을 읽는다."""
-    texts: list[str] = []
-
-    def walk(v):
-        if isinstance(v, str):
-            texts.append(v)
-        elif isinstance(v, dict):
-            for x in v.values():
-                walk(x)
-        elif isinstance(v, list):
-            for x in v:
-                walk(x)
-    walk(tool_response)
-    ids: list[str] = []
-    for t in texts:
-        ids += GUIDE_MARK.findall(t)
-        for p in SAVED_TO.findall(t):
-            fp = Path(p.rstrip(".,"))
-            if fp.name.startswith("mwg-guide-") and fp.exists():
-                try:
-                    ids += GUIDE_MARK.findall(fp.read_text(encoding="utf-8", errors="replace"))
-                except OSError:
-                    pass
-    return sorted(set(ids))
 
 
 def known_guides(root: Path) -> set[str]:
@@ -790,3 +884,16 @@ def known_guides(root: Path) -> set[str]:
         return {g["id"] for g in data.get("guides", []) if isinstance(g, dict) and g.get("id")}
     except (OSError, json.JSONDecodeError):
         return set()
+
+
+def first_positional(args: list[str]) -> tuple[str | None, list[str]]:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return (args[i + 1], args[i + 2:]) if i + 1 < len(args) else (None, [])
+        if a.startswith("-"):
+            i += 2 if ("=" not in a and a in VALUE_OPTIONS) else 1
+            continue
+        return a, args[i + 1:]
+    return None, []

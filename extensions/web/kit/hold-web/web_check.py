@@ -5,8 +5,10 @@
   python .claude/hold-web/web_check.py --metrics    # 훅 로그 집계 (측정)
 종료 코드: 0 통과(또는 확장 꺼짐), 1 실패.
 
-설치·고정 검사는 npm 캐시에 고정 버전 패키지가 있으면 그것으로 생성물을 다시 만들어 바이트 단위로 대조합니다.
-캐시가 없으면 lock.json 의 해시로만 대조하고 경고합니다.
+설치·고정 검사: 확장 코드 매니페스트, 훅 등록, lock.json, 그리고 검증된 사본(.hold/web-pkg/)으로 생성물을
+다시 만들어 바이트 단위로 대조합니다. 사본이 없으면 Lite 는 경고, Standard 이상은 실패입니다
+(CI 는 sync.py --fetch-only 로 사본을 받은 뒤 실행). 이 검사는 프로젝트 안의 확장 코드로 돌기 때문에,
+확장 코드 자체가 원본과 같은지는 CI 에서 extensions/web/install.py --verify 로 확인합니다.
 """
 from __future__ import annotations
 
@@ -41,14 +43,10 @@ class Report:
 
 # ── 설치·고정 버전 (R17) ─────────────────────────────────────────────
 
-def check_install(root: Path, cfg: dict, w: dict, rep: Report, regen: bool = True) -> None:
-    ver_file = root / ".claude/hold-web/VERSION"
-    if not ver_file.exists() or ver_file.read_text(encoding="utf-8").strip() != c.EXT_VERSION:
-        rep.fail(".claude/hold-web/VERSION", f"확장 코드가 web-{c.EXT_VERSION} 이 아닙니다. 사람이 extensions/web/install.py 로 다시 설치하세요")
+def check_install(root: Path, cfg: dict, w: dict, rep: Report) -> None:
+    check_ext_code(root, rep)
     if w["ext_version"] != c.EXT_VERSION:
         rep.fail("hold.toml", f"[web].ext_version {w['ext_version']} 과 설치된 확장 {c.EXT_VERSION} 이 다릅니다")
-    if not (root / ".claude/hooks/web_guard.py").exists():
-        rep.fail(".claude/hooks/web_guard.py", "웹 확장 훅이 없습니다")
     check_settings(root, rep)
 
     if not w["mwg_integrity"]:
@@ -74,29 +72,78 @@ def check_install(root: Path, cfg: dict, w: dict, rep: Report, regen: bool = Tru
         elif c.sha256(f.read_bytes()) != h:
             rep.fail(rel, "생성물이 sync.py 가 만든 내용과 다릅니다 (손으로 고쳤거나 다른 도구가 바꿈)")
 
-    if regen:
-        data = c.obtain_tarball(w, None, offline_only=True)
-        if data is None:
-            rep.warn("재생성 대조", "npm 캐시에 고정 버전 패키지가 없어 lock.json 해시로만 대조했습니다")
-        elif c.sri(data) != w["mwg_integrity"]:
-            rep.fail("재생성 대조", "npm 캐시의 패키지가 hold.toml 의 mwg_integrity 와 다릅니다 (캐시 오염 또는 버전 혼동)")
+    # 검증된 사본으로 생성물 전체를 다시 만들어 바이트 대조 (lock 까지 맞춘 위조도 잡는다)
+    tgz, _ = c.pkg_paths(root, w)
+    if not tgz.exists():
+        msg = (f"검증된 MWG 사본({c.PKG_STORE}/)이 없어 재생성 대조를 못 했습니다. "
+               "사람은 sync.py, CI 는 sync.py --fetch-only 를 먼저 실행하세요")
+        (rep.warn if c.profile_of(cfg) == "lite" else rep.fail)("재생성 대조", msg)
+    else:
+        data = tgz.read_bytes()
+        if c.sri(data) != w["mwg_integrity"]:
+            rep.fail(c.PKG_STORE, "보관된 패키지가 hold.toml 의 mwg_integrity 와 다릅니다")
         else:
             try:
-                expected = c.render(c.read_tarball(data), w)
+                files = c.tar_files(data)
+                expected = c.render(files, w)
             except c.SyncError as e:
                 rep.fail("재생성 대조", str(e))
-                expected = {}
+                files, expected = {}, {}
             for rel, b in expected.items():
                 f = root / rel
                 if f.exists() and f.read_bytes().replace(b"\r\n", b"\n") != b.replace(b"\r\n", b"\n"):
-                    rep.fail(rel, "고정 패키지와 hold.toml 로 다시 만든 내용과 다릅니다")
+                    rep.fail(rel, "검증된 패키지와 hold.toml 로 다시 만든 내용과 다릅니다")
+            _, err = c.verify_package(root, w, lock)
+            if err:
+                rep.fail(c.PKG_STORE, err)
 
     for stray in find_mwgrc(root, w):
         rep.fail(stray, "루트가 아닌 곳의 .mwgrc 는 그 폴더에서 MWG 정책을 덮어씁니다 (R14). 지우세요 — 정책은 hold.toml [web] 에서만")
-    pc = root / ".pre-commit-config.yaml"
-    if not pc.exists() or "hold-web-check" not in pc.read_text(encoding="utf-8"):
-        msg = "pre-commit 에 hold-web-check 가 없습니다 (extensions/web/kit/templates/pre-commit-snippet.yaml)"
-        (rep.warn if c.profile_of(cfg) == "lite" else rep.fail)(".pre-commit-config.yaml", msg)
+    check_precommit(root, cfg, rep)
+
+
+PRECOMMIT_HOOKS = {
+    "hold-web-check": "python .claude/hold-web/web_check.py",
+    "hold-web-legacy-scan": "python .claude/hold-web/web_scan.py",
+}
+
+
+def check_precommit(root: Path, cfg: dict, rep: Report) -> None:
+    pc = root / c.PRECOMMIT
+    text = pc.read_text(encoding="utf-8") if pc.exists() else ""
+    live = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    missing = [hid for hid, entry in PRECOMMIT_HOOKS.items()
+               if not re.search(rf"^\s*-\s*id:\s*{re.escape(hid)}\s*$", live, re.M)
+               or not re.search(rf"^\s*entry:\s*{re.escape(entry)}\s*$", live, re.M)]
+    if missing:
+        msg = f"pre-commit 에 {', '.join(missing)} 가 없습니다 (extensions/web/kit/templates/pre-commit-snippet.yaml)"
+        (rep.warn if c.profile_of(cfg) == "lite" else rep.fail)(c.PRECOMMIT, msg)
+    hook = root / ".git/hooks/pre-commit"
+    if (root / ".git").is_dir() and not hook.exists():
+        rep.warn(".git/hooks/pre-commit", "pre-commit 이 설치되어 있지 않습니다 (pre-commit install). 최종 방어선은 CI 입니다")
+
+
+def check_ext_code(root: Path, rep: Report) -> None:
+    """설치된 확장 코드가 install.py 가 기록한 매니페스트와 같은지. (원본과의 대조는 install.py --verify)"""
+    mf = root / c.EXT_MANIFEST
+    try:
+        manifest = json.loads(mf.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        rep.fail(c.EXT_MANIFEST, "확장 코드 매니페스트가 없습니다. 사람이 extensions/web/install.py 로 다시 설치하세요")
+        return
+    if manifest.get("ext_version") != c.EXT_VERSION:
+        rep.fail(c.EXT_MANIFEST, f"확장 코드가 web-{c.EXT_VERSION} 이 아닙니다")
+    files = manifest.get("files") or {}
+    present = {p.relative_to(root).as_posix() for p in (root / c.EXT_DIR).glob("*.py")} | (
+        {c.GUARD} if (root / c.GUARD).exists() else set())
+    for rel in sorted(present - set(files)):
+        rep.fail(rel, "매니페스트에 없는 확장 코드 파일입니다")
+    for rel, h in sorted(files.items()):
+        f = root / rel
+        if not f.exists():
+            rep.fail(rel, "확장 코드 파일이 없습니다")
+        elif c.sha256(f.read_bytes()) != h:
+            rep.fail(rel, "확장 코드가 설치된 내용과 다릅니다 (훅·검사 로직이 바뀌었을 수 있음)")
 
 
 def check_settings(root: Path, rep: Report) -> None:
@@ -196,11 +243,29 @@ def check_refs(body: str, known: set[str], where: str, rep: Report) -> None:
         rep.fail(where, f"mwg:{gid} 는 고정 버전 가이드 목록에 없는 ID 입니다. search 결과의 id 를 그대로 적으세요 (R16)")
 
 
+def git_added_date(root: Path, cdir: Path) -> str | None:
+    """변경 폴더가 Git 에 처음 들어온 날짜 (YYYYMMDD). Git 밖이거나 아직 커밋 전이면 None."""
+    import subprocess
+    try:
+        res = subprocess.run(["git", "log", "--diff-filter=A", "--format=%ad", "--date=format:%Y%m%d", "--", str(cdir)],
+                             cwd=root, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    dates = [d for d in res.stdout.split() if re.fullmatch(r"\d{8}", d)]
+    return min(dates) if res.returncode == 0 and dates else None
+
+
 def check_change(root: Path, cdir: Path, w: dict, known: set[str], rep: Report) -> None:
-    m = re.match(r"(\d{8})", cdir.name)
-    if not m or (w["since"] and m.group(1) < w["since"]):
-        return  # 확장을 켜기 전의 변경
     rel = cdir.relative_to(root).as_posix()
+    m = re.match(r"(\d{8})-", cdir.name)
+    if not m:
+        rep.fail(rel, "변경 폴더 이름은 YYYYMMDD-이름 형식이어야 합니다 (웹 확장 R16 적용 판단에 씁니다)")
+        return
+    if w["since"] and m.group(1) < w["since"]:
+        # 이름의 날짜가 이르더라도, Git 에 들어온 날짜가 없거나(새 폴더) since 이후면 검사한다 (이름만 바꿔 피하지 못하게)
+        added = git_added_date(root, cdir)
+        if added is not None and added < w["since"]:
+            return  # 확장을 켜기 전의 변경
     spec = cdir / "spec.md"
     if spec.exists():
         secs = sections(spec.read_text(encoding="utf-8"), "참조 가이드")
@@ -231,15 +296,18 @@ def check_changes(root: Path, cfg: dict, w: dict, rep: Report, only: Path | None
 
 # ── 실행 ─────────────────────────────────────────────────────────────
 
-def run(root: Path, regen: bool = True) -> tuple[Report, bool]:
+def run(root: Path) -> tuple[Report, bool]:
     cfg = c.load_toml(root)
     w, errors = c.web_config(cfg)
     rep = Report()
     for e in errors:
         rep.fail("hold.toml", e)
     if not w["enabled"]:
+        # 설치된 확장을 조용히 끄지 못하게 (tripwire): 끄려면 사람이 이유를 적는다
+        if (root / c.LOCK_PATH).exists() and not w["disabled_reason"].strip():
+            rep.fail("hold.toml", "웹 확장이 설치되어 있는데 꺼져 있습니다. 끈 것이 맞다면 사람이 [web].disabled_reason 에 이유를 적으세요")
         return rep, False
-    check_install(root, cfg, w, rep, regen)
+    check_install(root, cfg, w, rep)
     check_usage(root, rep)
     check_changes(root, cfg, w, rep)
     return rep, True
@@ -273,13 +341,12 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="HOLD 웹 확장 검사")
     ap.add_argument("--root", type=Path, default=c.project_root())
     ap.add_argument("--metrics", action="store_true", help="훅 로그 집계만 출력")
-    ap.add_argument("--no-regen", action="store_true", help="npm 캐시로 다시 만들어 대조하는 단계를 건너뜀")
     args = ap.parse_args(argv)
     root = args.root.resolve()
     if args.metrics:
         print(json.dumps(metrics(root), ensure_ascii=False, indent=1))
         return 0
-    rep, enabled = run(root, regen=not args.no_regen)
+    rep, enabled = run(root)
     for w in rep.warns:
         print("WARN " + w)
     for f in rep.fails:
