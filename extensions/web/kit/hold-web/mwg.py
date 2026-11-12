@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     if not w["enabled"]:
         print("웹 확장이 꺼져 있습니다 (hold.toml [web].enabled).", file=sys.stderr)
         return 2
-    sub, rest = c.first_positional(args)
+    sub, rest = (args[0], args[1:]) if args and not args[0].startswith('-') else (None, args)   # 하위 명령은 첫 인자 (ADV3-01)
     if sub not in c.ALLOWED_SUBCOMMANDS:
         print(f"하위 명령은 {', '.join(c.ALLOWED_SUBCOMMANDS)} 만 쓸 수 있습니다 (R17). "
               "정책·설정·버전은 사람이 hold.toml 과 sync.py 로 바꿉니다.", file=sys.stderr)

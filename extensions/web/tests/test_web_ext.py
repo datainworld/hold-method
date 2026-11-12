@@ -337,7 +337,7 @@ def test_ADV2_06_mtime과_크기를_되돌려도_내용_해시로_잡는다(proj
 
 def test_ADV2_06_백그라운드나_실패한_명령이_바꾼_파일은_다음_훅에서_잡는다(proj: Proj):
     write(proj.root, "web/later.js", LEGACY)          # 훅 밖에서 바뀜
-    res = proj.pre("Bash", command="ls")
+    res = proj.pre("Bash", command="git commit -m x")     # 커밋·푸시로 넘어가기 전에 막는다
     assert res.returncode == 2 and "web/later.js" in res.stderr and "지난 작업 이후" in res.stderr
 
 
@@ -527,3 +527,65 @@ def test_측정_집계(proj: Proj):
     proj.pre("Bash", command="npx modern-web-guidance@latest search x")
     m = json.loads(proj.check("--metrics").stdout)
     assert m["retrieve_confirmed"] == 1 and m["guard_block"] == 1 and m["guides_confirmed"] == ["dialog"]
+
+
+# ── 3차 리뷰 (ADV3) 회귀 ─────────────────────────────────────────────
+
+def test_ADV3_01_래퍼는_값_옵션_뒤의_위장_하위_명령을_거부한다(proj: Proj):
+    for args in (("--limit", "install", "search"), ("--limit", "update", "search"), ("--agent", "install", "search")):
+        res = proj.run("mwg.py", *args)
+        assert res.returncode == 2, args
+    assert not (proj.root / "skills-lock.json").exists()
+
+
+@pytest.mark.parametrize("cmd", [
+    "git commit -nm wip", "git commit -anm wip", "git commit -nqm x", "git commit --no-verif -m x", "git -C . commit -nm x",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+    "export GIT_CONFIG_COUNT=1", "SKIP=hold-web-legacy-scan git commit -m x", "pre-commit uninstall",
+    "echo 'exit 0' > .git/hooks/pre-commit", "chmod -x .git/hooks/pre-commit", "rm .git/hooks/pre-commit",
+])
+def test_ADV3_02_03_커밋_검사를_끄는_방법은_막는다(proj: Proj, cmd):
+    assert proj.pre("Bash", command=cmd).returncode == 2
+
+
+def test_ADV3_03_git_훅과_설정_파일은_보호한다(proj: Proj):
+    for f in (".git/hooks/pre-commit", ".git/config"):
+        assert proj.pre("Write", file_path=f).returncode == 2
+
+
+@pytest.mark.parametrize("cmd", ["git clean -fdx", "git reset --hard", "git checkout .", "git restore .", "git stash -u"])
+def test_ADV3_04_증거를_지우는_git_명령은_막는다(proj: Proj, cmd):
+    assert proj.pre("Bash", command=cmd).returncode == 2
+
+
+@pytest.mark.parametrize("cmd", ["git commit -m x", "git commit -am x", "git push -u origin main", "git status", "git checkout main",
+                                 "pre-commit run --all-files", "git reset HEAD~1"])
+def test_ADV3_정상_git_명령은_막지_않는다(proj: Proj, cmd):
+    assert proj.pre("Bash", command=cmd).returncode == 0
+
+
+def test_ADV3_05_위반은_고쳐질_때까지_계속_보고한다(proj: Proj):
+    write(proj.root, "web/stay.js", LEGACY)
+    assert proj.post("Bash", command="x").returncode == 2
+    assert proj.post("Bash", command="y").returncode == 2        # 한 번 알리고 사라지지 않는다
+    assert proj.pre("Bash", command="git commit -m x").returncode == 2
+    assert proj.pre("Bash", command="ls").returncode == 0        # 고치는 작업은 막지 않는다
+    write(proj.root, "web/stay.js", "const ok = 1;\n")
+    assert proj.post("Write", file_path="web/stay.js").returncode == 0
+    assert proj.post("Bash", command="z").returncode == 0
+
+
+def test_ADV3_05_스냅샷이_지워진_뒤_첫_훅은_전체를_검사한다(proj: Proj):
+    write(proj.root, "web/old.js", LEGACY)
+    (proj.root / ".hold/logs/web_snap.json").unlink()            # git clean 등으로 증거가 사라진 경우
+    res = proj.post("Bash", command="x")
+    assert res.returncode == 2 and "web/old.js" in res.stderr
+
+
+@pytest.mark.parametrize("cmd", [
+    "X=npx; $X -y modern-web-guidance@1.0.0 set-baseline limited", "$(echo npx) -y modern-web-guidance@1.0.0 search a",
+    "/usr/bin/np? -y modern-web-guidance@1.0.0 search a", "{npx,} -y modern-web-guidance@1.0.0 search a",
+    "echo npx -y modern-web-guidance@1.0.0 search a | sh", "source <(echo npx modern-web-guidance@1.0.0 search a)",
+])
+def test_ADV3_06_동적_문자열로_조립한_직접_호출도_막는다(proj: Proj, cmd):
+    assert proj.pre("Bash", command=cmd).returncode == 2

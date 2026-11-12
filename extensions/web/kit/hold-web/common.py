@@ -31,7 +31,8 @@ except ModuleNotFoundError:  # Python < 3.11
 EXT_VERSION = "0.1"
 PKG = "modern-web-guidance"
 ALLOWED_SUBCOMMANDS = ("search", "retrieve", "list", "legacy-scan")
-VALUE_OPTIONS = {"--skill-version", "--agent", "--format", "--limit", "--category"}
+# MWG(node util.parseArgs, strict:false)가 값을 받는 옵션으로 선언한 것은 --skill-version 뿐이다 (ADV3-01)
+VALUE_OPTIONS = {"--skill-version"}
 SCAN_TIMEOUT = 100
 HOOK_TIMEOUT_MIN = 120
 HASH_LIMIT = 1 << 20     # 이보다 작은 파일은 스냅샷에 내용 해시를 넣는다
@@ -53,10 +54,10 @@ HOOK_LOG = ".hold/logs/hooks.jsonl"
 PRECOMMIT = ".pre-commit-config.yaml"
 
 # 확장이 지키는 경로 (코어 보호 목록과 별개). 코어가 이미 지키는 hold.toml·.claude/ 도 Bash 판정을 더 엄격히 하려고 넣는다
-PROTECTED_PREFIXES = (".claude/", "hold.toml", "docs/hold/web/", ".hold/logs/", PKG_STORE + "/", USAGE_PATH, PRECOMMIT)
+PROTECTED_PREFIXES = (".claude/", ".git/hooks/", ".git/config", "hold.toml", "docs/hold/web/", ".hold/logs/", PKG_STORE + "/", USAGE_PATH, PRECOMMIT)
 PROTECTED_BASENAMES = (".mwgrc",)    # 위치 무관 (MWG 는 상위 폴더·홈의 .mwgrc 도 읽는다)
 PROTECTED_CANDIDATES = (             # 글롭 패턴과 대조할 구체적인 이름
-    ".claude", ".claude/settings.json", ".claude/settings.local.json", GUARD, EXT_DIR, WRAPPER, EXT_MANIFEST,
+    ".git/hooks", ".git/hooks/pre-commit", ".git/config", ".claude", ".claude/settings.json", ".claude/settings.local.json", GUARD, EXT_DIR, WRAPPER, EXT_MANIFEST,
     EXT_DIR + "/common.py", EXT_DIR + "/sync.py", EXT_DIR + "/web_check.py", EXT_DIR + "/web_scan.py", EXT_DIR + "/VERSION",
     ".claude/skills/modern-web-guidance", SKILL_PATH, LICENSE_PATH, "hold.toml", ".mwgrc", "docs/hold/web",
     GUIDES_PATH, LOCK_PATH, ".hold", ".hold/logs", HOOK_LOG, SNAP_FILE, PKG_STORE, USAGE_PATH, PRECOMMIT,
@@ -67,6 +68,8 @@ READONLY_COMMANDS = {"cat", "less", "more", "head", "tail", "grep", "egrep", "fg
                      "diff", "stat", "file", "md5sum", "sha256sum", "sha1sum", "realpath", "readlink", "type"}
 READONLY_GIT = {"diff", "log", "show", "status", "blame", "ls-files"}
 GIT_WRITE_OPTS = ("--output", "-o", "--output-directory", "--ext-diff")
+GIT_GATE_SUBS = {"commit", "merge", "push", "rebase", "cherry-pick", "am", "revert", "pull"}
+GIT_ENV_BAD = re.compile(r"^(GIT_CONFIG\w*|GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|SKIP|PRE_COMMIT\w*|HUSKY)=")
 WRAPPERS = {"env", "command", "exec", "time", "nohup", "sudo", "nice", "builtin", "xargs", "timeout", "stdbuf", "setsid"}
 WRAPPER_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-I", "-i", "-n", "-L", "-d", "-P", "-s", "-E", "-k", "--signal"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
@@ -405,8 +408,14 @@ def mwg_direct_calls(cmd: str) -> list[str]:
                 for j, a in enumerate(args):
                     if a in ("-c", "--call") and j + 1 < len(args):
                         hits += mwg_direct_calls(args[j + 1])
+        elif exe in SHELLS and not any(a == "-c" or (a.startswith("-") and not a.startswith("--") and "c" in a[1:]) for a in args) and PKG in cmd:
+            hits.append(joined)   # echo … | sh 처럼 표준입력으로 읽는 셸
+        elif exe in ("source", ".", "eval") and PKG in cmd:
+            hits.append(joined)
         elif exe not in MENTION_OK and any(PKG in t for t in sc.argv):
-            hits.append(joined)   # fail-closed: 실행 명령에 패키지 이름이 있는데 해석되지 않음
+            hits.append(joined)   # 실행 명령에 패키지 이름이 있는데 해석되지 않음
+        elif re.search(r"[$*?\[{]", exe) and re.search(r"npx|npm|node|modern|guidance|mjs", cmd):
+            hits.append(joined)   # 명령어 자리에 변수·글롭·중괄호가 있고 node 계열 이름이 보이면 막음 (정적 해석 불가)
     return hits
 
 
@@ -422,6 +431,50 @@ def check_mwg_calls(cmd: str) -> str | None:
     return None
 
 
+def _git_sub(argv: list[str]) -> tuple[str | None, list[str]]:
+    """git 전역 옵션(-c k=v, -C dir, --opt)을 건너뛴 하위 명령과 그 뒤 인자."""
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env") and "=" not in a:
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            return a, argv[i + 1:]
+    return None, []
+
+
+def _git_gate(sc: "SimpleCmd") -> str | None:
+    """pre-commit 을 건너뛰게 하거나, 증거(.hold)를 지울 수 있는 git·pre-commit 사용을 막는다 (ADV3-02·03·04)."""
+    argv = sc.argv
+    bad_env = [k for k in sc.assigns if GIT_ENV_BAD.match(k + "=")] + [t.split("=", 1)[0] for t in argv if GIT_ENV_BAD.match(t)]
+    if bad_env:
+        return f"{bad_env[0]} 환경변수로 git·pre-commit 동작을 바꿀 수 없습니다 (커밋 검사 우회 방지)."
+    if not argv:
+        return None
+    exe = argv[0].rsplit("/", 1)[-1]
+    if exe == "pre-commit" and any(a in ("uninstall", "install", "init-templatedir") for a in argv[1:]):
+        return "pre-commit 설치·해제는 사람이 합니다."
+    if exe != "git":
+        return None
+    low = [a.casefold() for a in argv]
+    if any("core.hookspath" in a for a in low):
+        return "core.hooksPath 로 pre-commit 을 우회할 수 없습니다."
+    sub, rest = _git_sub(argv)
+    allr = [a.casefold() for a in rest]
+    for a in allr + low:
+        name = a.split("=", 1)[0]
+        if len(name) >= 8 and name.startswith("--no-ver") and "--no-verify".startswith(name):
+            return "pre-commit 검사를 건너뛰는 git 옵션입니다 (--no-verify). 검사가 실패하면 고치거나 사람에게 보고하세요."
+    if sub in GIT_GATE_SUBS and any(re.fullmatch(r"-[a-z]*n[a-z]*", a) and a != "-n" or a == "-n" for a in rest if not a.startswith("--")):
+        return "pre-commit 검사를 건너뛰는 git 단축 옵션(-n)입니다. 검사가 실패하면 고치거나 사람에게 보고하세요."
+    if sub == "clean" or (sub == "reset" and "--hard" in allr) or (sub == "stash" and any(a in ("-u", "-a", "--include-untracked", "--all") for a in allr)) \
+            or (sub in ("checkout", "restore", "switch") and any(a in (".", "-f", "--force", ":/") for a in allr)):
+        return "작업 증거(.hold/)와 검증된 사본을 지울 수 있는 git 명령입니다 (clean, reset --hard, checkout ., stash -u). 사람이 실행하세요."
+    return None
+
+
 def check_bash_protected(cmd: str, root: Path) -> str | None:
     """보호 경로를 건드리는 Bash 명령인지. 읽기 전용 명령과 허락된 스크립트 실행만 허용한다."""
     try:
@@ -433,10 +486,9 @@ def check_bash_protected(cmd: str, root: Path) -> str | None:
         for t in argv:
             if token_hits(t, root, HUMAN_ONLY, substring=False):
                 return f"{t} 는 사람이 실행하는 스크립트입니다 (R17). 버전·정책을 바꿔야 한다고 판단되면 멈추고 보고하세요."
-        if argv and argv[0].rsplit("/", 1)[-1] == "git":
-            low = [a.casefold() for a in argv]
-            if "--no-verify" in low or ("commit" in low and "-n" in argv) or any("core.hookspath" in a for a in low):
-                return "pre-commit 검사를 건너뛰는 git 옵션입니다 (--no-verify, core.hooksPath). 검사가 실패하면 고치거나 사람에게 보고하세요."
+        msg = _git_gate(sc)
+        if msg:
+            return msg
         if any(token_hits(r, root) for r in sc.redirects):
             return "웹 확장 보호 경로에 리다이렉트로 쓸 수 없습니다."
         refs = [t for t in argv + list(sc.assigns.values()) if token_hits(t, root)]
@@ -739,6 +791,18 @@ def snapshot(root: Path, w: dict, cfg: dict, prev: dict | None = None) -> dict[s
     return snap
 
 
+def forget_files(root: Path, rels: list[str]) -> None:
+    """검사에서 문제가 난 파일은 스냅샷에서 빼서, 고쳐질 때까지 다음 훅에서도 다시 검사한다 (ADV3-05)."""
+    f = root / SNAP_FILE
+    try:
+        snap = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    for r in rels:
+        snap.pop(r, None)
+    f.write_text(json.dumps(snap, ensure_ascii=True), encoding="utf-8")
+
+
 def changed_files(root: Path, w: dict, cfg: dict) -> list[str] | None:
     """지난 훅 이후 바뀐 파일. 처음이면 기준만 남기고 None."""
     f = root / SNAP_FILE
@@ -752,7 +816,7 @@ def changed_files(root: Path, w: dict, cfg: dict) -> list[str] | None:
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(cur, ensure_ascii=True), encoding="utf-8")
     if prev is None:
-        return None
+        return sorted(cur) if (root / LOCK_PATH).exists() else None   # 설치된 프로젝트의 첫 훅은 전체를 본다 (ADV3-05)
 
     def differs(old: list | None, new: list) -> bool:
         if not old:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -40,6 +41,7 @@ def drift(c, web_check, cfg: dict, w: dict, when: str) -> list[str]:
     if not changed:
         return []
     problems: list[str] = []
+    bad: set[str] = set()                 # 문제가 난 파일은 고쳐질 때까지 계속 다시 본다 (ADV3-05)
     profile = c.profile_of(cfg)
     mode = c.scan_mode(w, profile)
     front = [r for r in changed if c.is_frontend(r, w)]
@@ -50,20 +52,27 @@ def drift(c, web_check, cfg: dict, w: dict, when: str) -> list[str]:
             c.log(ROOT, {**rec, "verdict": "skip", "detail": res.skipped})
             if profile == "regulated":
                 problems.append(f"레거시 패턴 검사를 하지 못했습니다 (R15): {res.skipped}")
+                bad.update(front)
         elif res.error:
             c.log(ROOT, {**rec, "verdict": "error", "detail": res.error})
             if mode == "block":
                 problems.append(f"레거시 패턴 검사가 실패했습니다 (R15): {res.error}")
+                bad.update(front)
         else:
             c.log(ROOT, {**rec, "verdict": "fail" if res.findings else "pass",
                          "guides": sorted({f.guide for f in res.findings}), "allowed": sorted({f.guide for f in res.allowed})})
             if res.findings and mode == "block":
                 problems.append(c.format_findings(res.findings, w))
+                bad.update(f.file for f in res.findings)
     folders = sorted({"/".join(r.split("/")[:2]) for r in changed if c.is_change_doc(r, cfg)})
     for folder in folders:
         rep = web_check.Report()
         web_check.check_changes(ROOT, cfg, w, rep, only=ROOT / folder)
-        problems += [f"웹 확장 산출물 검사 실패: {f}" for f in rep.fails]
+        if rep.fails:
+            problems += [f"웹 확장 산출물 검사 실패: {f}" for f in rep.fails]
+            bad.update(r for r in changed if r == folder or r.startswith(folder + "/"))
+    if bad:
+        c.forget_files(ROOT, sorted(bad))
     return problems
 
 
@@ -94,7 +103,9 @@ def run(data: dict) -> int:
             if msg:
                 return block(c, msg, {"tool": "Bash"})
         problems = drift(c, web_check, cfg, w, "between")
-        if problems:
+        # 문제가 남은 채로는 커밋·푸시로 넘어가지 못한다. 그 밖의 명령(고치는 편집 포함)은 막지 않고 Post 훅이 계속 알린다
+        gate = tool == "Bash" and re.search(r"\bgit\b[^;&|]*\b(commit|push|merge|tag)\b", ti.get("command") or "")
+        if problems and gate:
             print("지난 작업 이후 바뀐 파일에 문제가 있습니다. 먼저 고치세요.\n\n" + "\n\n".join(problems), file=sys.stderr)
             return 2
         return 0
