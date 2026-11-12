@@ -26,3 +26,16 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+      # 웹 확장 (9장). hold.toml 의 [web].enabled = false 이면 두 검사 모두 바로 통과합니다.
+      - id: hold-web-pinned
+        name: 웹 확장 고정 버전 검사 (R17)
+        entry: python scripts/hold_web_sync.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: hold-web-legacy-scan
+        name: 웹 확장 레거시 패턴 검사 (R15, block 모드에서만 실패)
+        entry: python scripts/web_scan.py
+        language: system
+        pass_filenames: true
+        files: \.(html?|css|[mc]?js|jsx|tsx?|vue|svelte)$
