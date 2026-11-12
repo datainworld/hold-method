@@ -7,9 +7,6 @@
 - 파일 도구(Edit, Write, MultiEdit, NotebookEdit): 대상 경로로 판정 (정확)
 - Bash: 보호 경로와 쓰기형 명령이 함께 보이면 차단 (휴리스틱, 우회 가능 — v0.1 한계)
 
-- Bash (웹 확장이 켜져 있을 때): Modern Web Guidance 를 hold.toml 의 고정 버전이 아닌 버전(@latest, 버전 생략 포함)으로
-  부르거나, 설정을 바꾸는 하위 명령(install, update, set-allow-…)을 부르면 차단 — 규칙 R17
-
 종료 코드 0 = 허용, 2 = 차단 (stderr 메시지가 에이전트에게 전달됨).
 보호 경로 목록은 hold.toml 의 [protect].paths 에서 읽습니다.
 """
@@ -33,7 +30,6 @@ DEFAULT_PROTECTED = [
     "tests/golden/",
     "tests/evals/",
     "docs/architecture/stakeholders.md",
-    "docs/hold/web/",
     "hold.toml",
     ".importlinter",
     ".claude/",
@@ -47,16 +43,6 @@ WRITE_WORDS = re.compile(
 # 리다이렉션 대상 (2>&1, >/dev/null 같은 무해한 형태는 제외)
 REDIRECT_TARGET = re.compile(r"(?<![0-9&])>>?\s*([^\s<>;&|]+)")
 SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\|")
-
-# 웹 확장 (R17): MWG CLI 호출과 사람만 바꾸는 하위 명령
-MWG_CALL = re.compile(r"\bmodern-web-guidance(?:@([\w.\-]+))?(?:\s+(\S+))?")
-MWG_HUMAN_ONLY = re.compile(r"^(install|update|uninstall|set-allow-[\w-]+)$")
-MWG_MESSAGE = (
-    "Modern Web Guidance 는 hold.toml [web].mwg_version = {ver} 으로 고정되어 있습니다 (HOLD R17).\n"
-    "{reason}\n"
-    "고정 버전으로 다시 실행하세요: DISABLE_TELEMETRY=1 npx -y modern-web-guidance@{ver} <search|retrieve|list> …\n"
-    "버전 변경이나 실험 기능 켜기가 필요하다고 판단되면 멈추고, 이유를 사람에게 보고하세요."
-)
 
 MESSAGE = (
     "{path} 는 사람이 소유한 파일입니다 (HOLD H1). 수정하지 마세요.\n"
@@ -114,25 +100,6 @@ def log(root: Path, cfg: dict, record: dict) -> None:
         pass  # 로그 실패는 판정에 영향을 주지 않음
 
 
-def check_mwg_call(cmd: str, cfg: dict) -> str | None:
-    """웹 확장이 켜져 있을 때, 고정 버전이 아닌 MWG 호출이나 사람 전용 하위 명령이면 차단 메시지를 돌려준다."""
-    web = cfg.get("web") or {}
-    if not web.get("enabled"):
-        return None
-    pinned = str(web.get("mwg_version", "1.0.0"))
-    for seg in SEGMENT_SPLIT.split(cmd):
-        if not re.search(r"\b(npx|pnpx|pnpm|npm|yarn|bunx)\b", seg):
-            continue  # 실행이 아닌 언급 (grep, echo 등)은 대상이 아님
-        for m in MWG_CALL.finditer(seg):
-            version, sub = m.group(1), (m.group(2) or "")
-            if version != pinned:
-                got = f"@{version}" if version else "버전 생략(최신 또는 캐시된 임의 버전)"
-                return MWG_MESSAGE.format(ver=pinned, reason=f"이 명령은 {got} 으로 실행하려 했습니다.")
-            if MWG_HUMAN_ONLY.match(sub):
-                return MWG_MESSAGE.format(ver=pinned, reason=f"'{sub}' 는 에이전트 설정·실험 기능을 바꾸는 명령이라 사람이 실행합니다.")
-    return None
-
-
 def check(data: dict, root: Path, cfg: dict) -> tuple[bool, str]:
     """(허용 여부, 메시지)를 돌려준다."""
     tool = data.get("tool_name", "")
@@ -151,9 +118,6 @@ def check(data: dict, root: Path, cfg: dict) -> tuple[bool, str]:
 
     if tool == "Bash":
         cmd = (tool_input.get("command") or "").replace("\\", "/")
-        web_block = check_mwg_call(cmd, cfg)
-        if web_block:
-            return False, web_block
         for seg in SEGMENT_SPLIT.split(cmd):
             targets = [t for t in REDIRECT_TARGET.findall(seg) if t not in {"/dev/null", "&1", "&2"}]
             for t in targets:

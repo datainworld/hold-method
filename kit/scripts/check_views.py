@@ -9,11 +9,6 @@
   Stage 3  plan.md 에 "## 모듈별 작업 범위" 절이 있다
   공통     산출물에 적힌 SH-ID 가 모두 정의서에 있다
            mermaid 블록이 렌더링된다 (mmdc 가 설치된 경우에만, 없으면 경고)
-  웹 확장  (hold.toml [web].enabled = true 일 때, 방법론 9장)
-           정의서에 "사용 환경" 칸이 있다 (지원 기준 R14 의 근거)
-           고정 버전 가이드 목록(docs/hold/web/guides.json)이 있다
-           spec.md 에 "## 참조 가이드" 절이 있고, 백틱으로 적은 가이드 ID 가 모두 고정 목록에 있다 (R16)
-           (가이드를 쓰지 않았으면 "생략: 이유"). plan.md 에 같은 절이 있으면 같은 방식으로 대조한다
 
 사용법:
   python scripts/check_views.py                 # 프로젝트 전체 검사
@@ -23,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -42,15 +36,11 @@ SH_ID = re.compile(r"\bSH-[A-Z]\d{2,3}\b")
 MERMAID_BLOCK = re.compile(r"```mermaid\s*\n(.*?)```", re.S)
 COMPONENT_KINDS = ("C4Component", "C4Container", "flowchart", "graph ")
 SKIP_LINE = re.compile(r"^\s*>?\s*생략\s*:", re.M)
-BACKTICK_ID = re.compile(r"`([a-z0-9][a-z0-9-]*[a-z0-9])`")
-HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
-USAGE_ENV_COLUMN = re.compile(r"^\s*\|.*\|\s*사용 환경\s*\|", re.M)  # 표 머리행의 열 제목
 
 DEFAULTS = {
     "stakeholders": "docs/architecture/stakeholders.md",
     "context_view": "docs/architecture/views/context.md",
     "changes": "changes",
-    "web_guides": "docs/hold/web/guides.json",
 }
 
 
@@ -147,46 +137,7 @@ def check_stage0(root: Path, paths: dict, report: Report) -> set[str]:
     return ids
 
 
-def load_web_guides(root: Path, paths: dict, report: Report) -> set[str]:
-    """웹 확장이 켜졌을 때 고정 버전 가이드 ID 집합. 목록이 없으면 실패를 남기고 빈 집합."""
-    gp = root / paths["web_guides"]
-    if not gp.exists():
-        report.fail(gp.relative_to(root), "웹 확장이 켜져 있는데 고정 버전 가이드 목록이 없습니다. "
-                    "사람이 python scripts/hold_web_sync.py 를 실행해야 합니다 (9장)")
-        return set()
-    try:
-        data = json.loads(gp.read_text(encoding="utf-8"))
-        return {g["id"] for g in data.get("guides", []) if isinstance(g, dict) and g.get("id")}
-    except (json.JSONDecodeError, AttributeError, KeyError):
-        report.fail(gp.relative_to(root), "가이드 목록을 읽지 못했습니다. hold_web_sync.py 로 다시 만드세요")
-        return set()
-
-
-def check_web_stage0(root: Path, paths: dict, report: Report) -> None:
-    reg = root / paths["stakeholders"]
-    if reg.exists() and not USAGE_ENV_COLUMN.search(reg.read_text(encoding="utf-8")):
-        report.fail(reg.relative_to(root), "웹 확장이 켜져 있는데 정의서에 '사용 환경' 칸이 없습니다. "
-                    "사람 이해관계자의 브라우저·기기 환경이 지원 기준(hold.toml [web].baseline)의 근거입니다 (R14)")
-
-
-def check_guide_refs(body: str | None, known: set[str], where: Path, report: Report, required: bool) -> None:
-    if body is None:
-        if required:
-            report.fail(where, "'## 참조 가이드' 절이 없습니다 (웹 확장 R16). 가이드를 쓰지 않았으면 '생략: 이유'를 적으세요")
-        return
-    body = HTML_COMMENT.sub("", body)
-    refs = set(BACKTICK_ID.findall(body))
-    if not refs:
-        if not SKIP_LINE.search(body):
-            report.fail(where, "'## 참조 가이드' 절에 가이드 ID(백틱)도 '생략: 이유'도 없습니다 (R16)")
-        return
-    if known:
-        for gid in sorted(refs - known):
-            report.fail(where, f"`{gid}` 는 고정 버전 가이드 목록에 없는 ID 입니다. search 결과의 id 를 그대로 적으세요 (R16)")
-
-
-def check_change(change: Path, root: Path, ids: set[str], profile: str, report: Report,
-                 web_guides: set[str] | None = None) -> None:
+def check_change(change: Path, root: Path, ids: set[str], profile: str, report: Report) -> None:
     rel = change.relative_to(root)
     intent, spec, plan = change / "intent.md", change / "spec.md", change / "plan.md"
 
@@ -222,17 +173,12 @@ def check_change(change: Path, root: Path, ids: set[str], profile: str, report: 
                     report.fail(rel / "spec.md", "'## 뷰'에 컴포넌트 뷰(C4 또는 flowchart)가 없습니다. 바뀌지 않으면 '생략: 이유'를 적으세요")
         check_ids(text, ids, rel / "spec.md", report)
         check_mermaid_render(MERMAID_BLOCK.findall(text), rel / "spec.md", report)
-        if web_guides is not None:
-            check_guide_refs(find_section(secs, "참조 가이드"), web_guides, rel / "spec.md", report, required=True)
 
     if plan.exists():
         text = plan.read_text(encoding="utf-8")
-        psecs = sections(text)
-        if find_section(psecs, "모듈별 작업 범위") is None:
+        if find_section(sections(text), "모듈별 작업 범위") is None:
             report.fail(rel / "plan.md", "'## 모듈별 작업 범위' 절이 없습니다 (모듈 = worktree 단위)")
         check_ids(text, ids, rel / "plan.md", report)
-        if web_guides is not None:
-            check_guide_refs(find_section(psecs, "참조 가이드"), web_guides, rel / "plan.md", report, required=False)
 
 
 def run(root: Path, only: list[Path] | None = None, profile: str | None = None) -> Report:
@@ -241,10 +187,6 @@ def run(root: Path, only: list[Path] | None = None, profile: str | None = None) 
     profile = (profile or cfg.get("hold", {}).get("profile") or "lite").lower()
     report = Report()
     ids = check_stage0(root, paths, report)
-    web_guides = None
-    if (cfg.get("web") or {}).get("enabled"):
-        check_web_stage0(root, paths, report)
-        web_guides = load_web_guides(root, paths, report)
 
     changes_dir = root / paths["changes"]
     if only:
@@ -255,7 +197,7 @@ def run(root: Path, only: list[Path] | None = None, profile: str | None = None) 
         targets = []
     for change in targets:
         if change.is_dir():
-            check_change(change, root, ids, profile, report, web_guides)
+            check_change(change, root, ids, profile, report)
     if not shutil.which("mmdc"):
         report.warn("mmdc(mermaid-cli)가 없어 렌더 검사를 생략했습니다. 설치: npm i -g @mermaid-js/mermaid-cli")
     return report

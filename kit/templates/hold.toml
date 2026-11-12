@@ -12,7 +12,6 @@ changes = "changes"                         # 변경 단위 폴더: changes/<YYY
 contracts = "app/contracts"                 # 계약 패키지 (Stage 2.5)
 generated_views = "docs/architecture/views/generated"
 hook_log = ".hold/logs/hooks.jsonl"         # 측정용 훅 로그 (Git 밖)
-web_guides = "docs/hold/web/guides.json"    # 웹 확장: 고정 버전 가이드 목록 (hold_web_sync.py 가 생성)
 
 [protect]
 # H1 사람의 역할: 아래 경로는 사람만 수정합니다.
@@ -23,30 +22,7 @@ paths = [
   "tests/golden/",
   "tests/evals/",
   "docs/architecture/stakeholders.md",
-  "docs/hold/web/",
   "hold.toml",
   ".importlinter",
   ".claude/",
 ]
-
-[web]
-# 웹 프런트엔드 확장 web-0.1 — Modern Web Guidance(MWG) 통합 (방법론 9장). 기본은 꺼짐.
-# 켠 뒤에는 사람이 python scripts/hold_web_sync.py 를 실행해 고정 버전 skill 과 가이드 목록을 설치합니다.
-enabled = false
-ext_version = "0.1"
-mwg_version = "1.0.0"     # MWG 고정 버전. 올리는 것은 하나의 변경(intent)이고 사람만 합니다 (R17)
-# 브라우저 지원 기준 (R14). 이해관계자 정의서의 "사용 환경" 칸을 근거로 사람이 정합니다.
-#   "widely"  = Baseline Widely available (MWG 기본값: 모든 주요 브라우저에서 30개월 이상)
-#   "newly"   = Baseline Newly available 까지 허용 (기능 감지 + 우아한 저하 전제)
-#   "2024" 등 = Baseline 연도 타겟 (그 해까지 Baseline 이 된 기능은 대체 코드 없이 사용)
-baseline = "widely"
-# 지원 기준 밖 브라우저에서의 대체 동작 정책. 사람이 한두 문장으로 씁니다. 비우면 MWG 가이드의 기본 권고를 따릅니다.
-fallback_policy = ""
-telemetry = false         # false 면 MWG CLI 호출에 DISABLE_TELEMETRY=1 을 붙입니다
-# 레거시 패턴 검사 (R15): off | log | block | auto (auto = lite 는 log, standard·regulated 는 block)
-legacy_scan = "auto"
-# 검토 후 받아들인 검출. "가이드ID"(모든 파일) 또는 "가이드ID:경로 패턴" (예: "secure-external-subresources:public/*.html")
-legacy_allow = []
-# 검사할 프런트엔드 파일 확장자와 건너뛸 폴더
-frontend_suffixes = [".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte"]
-skip_dirs = ["node_modules", "dist", "build", ".next", ".nuxt", "vendor", ".venv"]

@@ -16,7 +16,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|Bash",
+        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           { "type": "command", "command": "python .claude/hooks/post_edit.py" }
         ]

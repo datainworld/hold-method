@@ -2,11 +2,9 @@
 """HOLD 키트 설치 — 새 프로젝트(또는 기존 프로젝트)에 hold-kit 을 깝니다.
 
     python kit/scripts/hold_init.py --target ../my-project --profile lite
-    python kit/scripts/hold_init.py --target ../my-project --profile lite --web   # 웹 프런트엔드 확장 켜기 (9장)
 
 이미 있는 파일은 덮어쓰지 않습니다 (--force 로 덮어쓰기). .claude/settings.json 이 이미 있으면
 .claude/settings.hold.json 으로 따로 쓰고, 합치는 방법을 안내합니다.
-웹 확장의 스크립트(web_scan.py, hold_web_sync.py)는 항상 설치되고, --web 일 때 hold.toml 의 [web].enabled 가 true 가 됩니다.
 """
 from __future__ import annotations
 
@@ -24,8 +22,6 @@ COPIES = [
     ("hooks/post_edit.py", ".claude/hooks/post_edit.py"),
     ("scripts/check_views.py", "scripts/check_views.py"),
     ("scripts/gen_views.py", "scripts/gen_views.py"),
-    ("scripts/web_scan.py", "scripts/web_scan.py"),
-    ("scripts/hold_web_sync.py", "scripts/hold_web_sync.py"),
     ("skills/hold-intent/SKILL.md", ".claude/skills/hold-intent/SKILL.md"),
     ("skills/hold-architecture/SKILL.md", ".claude/skills/hold-architecture/SKILL.md"),
     ("skills/hold-views/SKILL.md", ".claude/skills/hold-views/SKILL.md"),
@@ -44,8 +40,6 @@ COPIES = [
 ]
 EMPTY_DIRS = ["docs/adr", "docs/issues", "docs/architecture/views/generated", "tests/contracts", "tests/golden", "tests/evals"]
 GITIGNORE_LINES = [".env", ".env.*", ".venv/", "__pycache__/", ".hold/logs/"]
-# 웹 확장을 켜면 측정 시트에 더하는 열 (9장 측정)
-WEB_MEASURE_COLUMNS = ["web_ext", "mwg_version", "guides_referenced", "guides_retrieved", "legacy_findings", "legacy_allowed"]
 
 
 def write(dst: Path, text: str | None, src: Path | None, force: bool, done: list[str], skipped: list[str], root: Path) -> None:
@@ -66,7 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target", type=Path, required=True, help="설치할 프로젝트 폴더")
     ap.add_argument("--profile", choices=["lite", "standard", "regulated"], default="lite")
     ap.add_argument("--force", action="store_true", help="이미 있는 파일도 덮어쓴다")
-    ap.add_argument("--web", action="store_true", help="웹 프런트엔드 확장(Modern Web Guidance 통합, 9장)을 켠다")
     args = ap.parse_args(argv)
 
     root = args.target.resolve()
@@ -74,21 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     done: list[str] = []
     skipped: list[str] = []
 
-    # hold.toml — 프로필(과 웹 확장)을 채워서
+    # hold.toml — 프로필을 채워서
     toml = (KIT / "templates/hold.toml").read_text(encoding="utf-8")
     toml = re.sub(r'profile = "\w+"', f'profile = "{args.profile}"', toml, count=1)
-    if args.web:
-        toml = re.sub(r"(\[web\][^\[]*?\n)enabled = false", r"\1enabled = true", toml, count=1, flags=re.S)
     write(root / "hold.toml", toml, None, args.force, done, skipped, root)
 
     for src, dst in COPIES:
-        if dst == "docs/hold/measurement.csv" and args.web:
-            header = (KIT / src).read_text(encoding="utf-8").rstrip("\n")
-            write(root / dst, header + "," + ",".join(WEB_MEASURE_COLUMNS) + "\n", None, args.force, done, skipped, root)
-            continue
         write(root / dst, None, KIT / src, args.force, done, skipped, root)
-    if args.web:
-        (root / "docs/hold/web").mkdir(parents=True, exist_ok=True)
 
     # .claude/settings.json — 이미 있으면 따로 쓴다
     settings_src = KIT / "settings/settings.json"
@@ -130,13 +115,6 @@ def main(argv: list[str] | None = None) -> int:
         "  3. .importlinter 의 모듈 이름을 프로젝트에 맞게 고친다\n"
         "  4. python scripts/check_views.py 가 통과하면 커밋한다"
     )
-    if args.web:
-        print(
-            "\n웹 확장 (9장) — 사람이 할 일\n"
-            "  5. 정의서의 '사용 환경' 칸을 채우고, hold.toml [web] 의 baseline·fallback_policy 를 정한다\n"
-            "  6. python scripts/hold_web_sync.py 로 Modern Web Guidance 고정 버전을 설치한다 (Node.js 22+, npm 필요)\n"
-            "  7. MWG 플러그인을 전역으로 설치했다면 이 프로젝트에서는 끈다 (@latest 원본과 겹침)"
-        )
     return 0
 
 
