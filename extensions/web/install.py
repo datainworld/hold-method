@@ -91,29 +91,35 @@ def usage_template(root: Path) -> str:
     )
 
 
-def ext_sources() -> dict[str, Path]:
-    out = {c.GUARD: KIT / "hooks/web_guard.py"}
+def ext_sources(guard: bool = True) -> dict[str, Path]:
+    out = {c.GUARD: KIT / "hooks/web_guard.py"} if guard else {}
     for f in sorted((KIT / "hold-web").glob("*.py")):
         out[f"{c.EXT_DIR}/{f.name}"] = f
     return out
 
 
-def manifest(root: Path) -> dict:
+def manifest(root: Path, guard: bool = True) -> dict:
     return {"ext_version": c.EXT_VERSION,
-            "files": {rel: c.sha256((root / rel).read_bytes()) for rel in ext_sources()}}
+            "files": {rel: c.sha256((root / rel).read_bytes()) for rel in ext_sources(guard)}}
+
+
+def project_guard(root: Path) -> bool:
+    w, _ = c.web_config(c.load_toml(root))
+    return bool(w["guard"])
 
 
 def verify(root: Path) -> int:
     """CI 용: 프로젝트의 확장 코드를 이 원본과 대조하고, 원본 코드(신뢰할 수 있는 쪽)로 전체 검사를 돌린다."""
     import web_check  # 원본 kit/hold-web/web_check.py
     problems = []
-    for rel, src in ext_sources().items():
+    guard = project_guard(root)
+    for rel, src in ext_sources(guard).items():
         f = root / rel
         if not f.exists():
             problems.append(f"{rel}: 없습니다")
         elif c.sha256(f.read_bytes()) != c.sha256(src.read_bytes()):
             problems.append(f"{rel}: 원본(extensions/web/kit)과 다릅니다")
-    extra = {p.relative_to(root).as_posix() for p in (root / c.EXT_DIR).glob("*.py")} - set(ext_sources())
+    extra = {p.relative_to(root).as_posix() for p in (root / c.EXT_DIR).glob("*.py")} - set(ext_sources(guard))
     problems += [f"{rel}: 원본에 없는 확장 코드 파일입니다" for rel in sorted(extra)]
     rep, enabled = web_check.run(root)
     problems += rep.fails
@@ -131,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="HOLD 웹 확장 web-0.1 설치 (사람이 실행)")
     ap.add_argument("--target", type=Path, required=True)
     ap.add_argument("--since", default=dt.date.today().strftime("%Y%m%d"), help="R16 을 적용할 변경의 시작 날짜 YYYYMMDD")
+    ap.add_argument("--with-guard", action="store_true",
+                    help="실행 시점 훅(web_guard.py)까지 설치 (강화, 선택). 기본은 방법론 통합만: 고정 버전·정책·참조 가이드·커밋 시점 검사")
     ap.add_argument("--verify", action="store_true", help="설치하지 않고 대조·검사만 (CI)")
     args = ap.parse_args(argv)
     root = args.target.resolve()
@@ -145,14 +153,16 @@ def main(argv: list[str] | None = None) -> int:
     done: list[str] = []
 
     # 확장 코드 (확장이 소유 — 항상 이 판으로)
-    (root / ".claude/hooks").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(KIT / "hooks/web_guard.py", root / ".claude/hooks/web_guard.py")
+    guard = args.with_guard
+    if guard:
+        (root / ".claude/hooks").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(KIT / "hooks/web_guard.py", root / ".claude/hooks/web_guard.py")
     dst = root / ".claude/hold-web"
     dst.mkdir(parents=True, exist_ok=True)
     for f in (KIT / "hold-web").glob("*.py"):
         shutil.copyfile(f, dst / f.name)
-    (root / c.EXT_MANIFEST).write_text(json.dumps(manifest(root), ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    done.append(".claude/hooks/web_guard.py, .claude/hold-web/ (MANIFEST.json)")
+    (root / c.EXT_MANIFEST).write_text(json.dumps(manifest(root, guard), ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    done.append((".claude/hooks/web_guard.py, " if guard else "") + ".claude/hold-web/ (MANIFEST.json)")
     gi = root / ".gitignore"
     lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
     if c.PKG_STORE + "/" not in lines:
@@ -161,12 +171,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # hold.toml [web]
     if "web" not in c.load_toml(root):
-        block = (KIT / "templates/hold-web.toml").read_text(encoding="utf-8").replace("{since}", args.since)
+        block = (KIT / "templates/hold-web.toml").read_text(encoding="utf-8").replace("{since}", args.since).replace("{guard}", "true" if guard else "false")
         with (root / "hold.toml").open("a", encoding="utf-8") as fh:
             fh.write(block)
         done.append("hold.toml [web]")
 
-    merge_settings(root, done)
+    if guard:
+        merge_settings(root, done)
     put_block(root / "CLAUDE.md", (KIT / "templates/claude-md.md").read_text(encoding="utf-8"), done)
     put_block(root / "changes/_template/spec.md", (KIT / "templates/spec-section.md").read_text(encoding="utf-8"), done)
 

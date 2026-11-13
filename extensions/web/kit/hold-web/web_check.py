@@ -47,7 +47,8 @@ def check_install(root: Path, cfg: dict, w: dict, rep: Report) -> None:
     check_ext_code(root, rep)
     if w["ext_version"] != c.EXT_VERSION:
         rep.fail("hold.toml", f"[web].ext_version {w['ext_version']} 과 설치된 확장 {c.EXT_VERSION} 이 다릅니다")
-    check_settings(root, rep)
+    if w["guard"]:
+        check_settings(root, rep)
 
     if not w["mwg_integrity"]:
         rep.fail("hold.toml", "[web].mwg_integrity 가 비어 있습니다. 사람이 python .claude/hold-web/sync.py --pin <버전> 을 실행하세요")

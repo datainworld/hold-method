@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -589,3 +590,30 @@ def test_ADV3_05_스냅샷이_지워진_뒤_첫_훅은_전체를_검사한다(pr
 ])
 def test_ADV3_06_동적_문자열로_조립한_직접_호출도_막는다(proj: Proj, cmd):
     assert proj.pre("Bash", command=cmd).returncode == 2
+
+
+# ── 방법론 통합만 (훅 없음, 기본 설치) ──────────────────────────────
+
+def test_기본_설치는_훅_없이_방법론_통합만_한다(tmp_path: Path, fake_bin: Path):
+    root = tmp_path / "lite"
+    core_init(root, "standard")
+    assert ext_install(root).returncode == 0
+    assert not (root / ".claude/hooks/web_guard.py").exists()
+    settings = (root / ".claude/settings.json").read_text(encoding="utf-8")
+    assert "web_guard" not in settings
+    toml = (root / "hold.toml").read_text(encoding="utf-8")
+    assert "guard = false" in toml
+    manifest = json.loads((root / ".claude/hold-web/MANIFEST.json").read_text(encoding="utf-8"))
+    assert ".claude/hooks/web_guard.py" not in manifest["files"]
+    for rel in ("docs/architecture/usage-environments.md", "docs/hold/web-measurement.csv"):
+        assert (root / rel).exists()
+
+
+def test_훅_없는_설치도_확장_검사는_통과하고_원본_대조가_된다(tmp_path: Path, fake_bin: Path):
+    root = tmp_path / "lite2"
+    core_init(root, "standard")
+    assert ext_install(root).returncode == 0
+    res = ext_install(root, "--verify")
+    # 사람이 채울 항목(사용 환경, 고정 설치)은 아직 실패하지만, 훅·확장 코드 대조 항목은 실패하지 않는다
+    assert ".claude/hooks/web_guard.py" not in res.stdout and "settings.json" not in res.stdout
+    assert "원본(extensions/web/kit)과 다릅니다" not in res.stdout

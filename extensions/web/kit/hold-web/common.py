@@ -78,6 +78,7 @@ GLOB_META = set("*?[")
 
 DEFAULTS: dict = {
     "enabled": False,
+    "guard": False,            # 실행 시점 훅(web_guard.py)을 쓰는지. 기본은 쓰지 않음 (방법론 통합만)
     "disabled_reason": "",
     "ext_version": EXT_VERSION,
     "since": "",

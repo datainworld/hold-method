@@ -195,7 +195,7 @@ def sync_cmd(root: Path, *args: str) -> list[str]:
 def build(tmp_path: Path, fake_bin: Path, profile: str = "standard", ready: bool = True) -> Proj:
     root = tmp_path / "proj"
     core_init(root, profile)
-    res = ext_install(root)
+    res = ext_install(root, "--with-guard")
     assert res.returncode == 0, res.stderr
     tarball = make_tarball(tmp_path / "mwg-1.0.0.tgz")
     p = Proj(root, fake_bin, tmp_path, tarball)
