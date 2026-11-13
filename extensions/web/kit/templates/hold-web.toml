@@ -1,0 +1,23 @@
+
+[web]
+# HOLD 웹 프런트엔드 확장 web-0.1 — Modern Web Guidance(MWG) 통합 (extensions/web/README.md)
+# 사람 소유 (hold.toml 은 보호 경로). 바꾼 뒤에는 사람이 python .claude/hold-web/sync.py 를 다시 실행합니다.
+enabled = true
+# 실행 시점 훅(web_guard.py)을 쓰는지. false 는 방법론 통합(고정 버전·정책·참조 가이드·커밋 시점 검사)만, true 는 훅까지 (강화, 선택).
+guard = {guard}
+ext_version = "0.1"
+since = "{since}"          # 이 날짜(YYYYMMDD) 이후의 changes/ 에만 참조 가이드 검사(R16)를 적용
+# MWG 고정 버전과 npm 무결성 값 (R17). sync.py --pin <버전> 이 채웁니다.
+mwg_version = "1.0.0"
+mwg_integrity = ""
+# 브라우저 지원 기준 (R14): widely | newly | limited | 연도("2024").
+# docs/architecture/usage-environments.md 의 사용 환경을 근거로 사람이 정합니다. sync.py 가 .mwgrc 로 옮깁니다.
+baseline = "widely"
+fallback_policy = ""      # 지원 기준 밖 브라우저의 대체 동작 정책 (한두 문장). 비우면 가이드 권고
+allow_origin_trials = false
+allow_volatile_features = false
+telemetry = false         # false 면 MWG 호출에 DISABLE_TELEMETRY=1 이 없을 때 훅이 막는다
+# 레거시 패턴 검사 (R15): off | log | block | auto (lite=log, standard·regulated=block)
+legacy_scan = "auto"
+# 받아들인 검출: "가이드ID" 또는 "가이드ID:경로패턴" ('*' 는 한 폴더 안, '**' 는 하위 폴더까지)
+legacy_allow = []

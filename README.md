@@ -5,6 +5,7 @@
 > AI가 루프를 돌리고, 모든 산출물에는 주인이 있으며, 사람이 소유한 선은 에이전트가 넘지 못한다.
 
 - 판: **v0.1** (2026-11, 실증 전 — 모든 원칙의 근거 등급은 "가설")
+- 실험 확장: **web-0.1** (2026-11-12) — 웹 프런트엔드, Modern Web Guidance 통합. v0.1 방법론 밖이며 코어를 고치지 않음 ([extensions/](extensions/README.md))
 - 기본 프로필: Lite
 - 기술 맥락: Python 3.11+, LangChain·LangGraph, PostgreSQL, Claude Code (원칙과 프로세스는 도구 중립)
 
@@ -22,6 +23,7 @@
 | `method-adr/` | 방법론 자체의 결정 기록 | CC BY 4.0 |
 | `friction/` | 실증 중 마찰 기록 양식과 공개용 요약 | CC BY 4.0 |
 | `tests/` | 키트 자체의 테스트 | Apache-2.0 |
+| `extensions/` | 실험 확장 (코어 밖, 코어 무수정을 매니페스트로 검사) | Apache-2.0 (코드), CC BY 4.0 (문서) |
 | `CHANGELOG.md` | 판별 변경 내역 | CC BY 4.0 |
 
 ## 읽는 순서

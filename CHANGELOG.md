@@ -1,6 +1,19 @@
 # CHANGELOG
 
-판 번호 규칙: `v0.N`은 실증 회고를 거친 개정판, `v0.N.x`는 작업을 막는 결함만 고친 패치입니다. 자세한 규칙은 [method/08-revision.md](method/08-revision.md).
+판 번호 규칙: `v0.N`은 실증 회고를 거친 개정판, `v0.N.x`는 작업을 막는 결함만 고친 패치입니다. 자세한 규칙은 [method/08-revision.md](method/08-revision.md). `extensions/`의 실험 확장은 코어 판과 따로 `<이름>-0.N`으로 적습니다(제안, [extensions/README.md](extensions/README.md)).
+
+## 실험 확장 web-0.1 — 2026-11-12 (코어 v0.1 무수정)
+
+웹 프런트엔드 확장. Google Chrome의 Modern Web Guidance 1.0.0을 고정 버전으로 들이고, 정책·버전·허용 목록을 사람이 소유하게 합니다. 문서 [extensions/web/README.md](extensions/web/README.md), 결정 기록 [method-adr/0002](method-adr/0002-web-extension-mwg.md).
+
+- 초판은 코어 파일을 고쳤다가 적대적 리뷰(16건, 병합 보류)를 받고 코어 무수정으로 다시 설계했습니다. 재설계판도 2차 리뷰(13건, 병합 보류)를 받아 검증된 사본 + 래퍼 방식으로 보강했고, 3차 리뷰(7건, 조건부 보류)를 반영했습니다. 리뷰 원문과 처리 결과는 ADR 0002에 있습니다.
+- 확장 규약(제안): 코어 무수정, 별도 훅 등록, 발행 전 적대적 리뷰, 실증과 측정 분리. 코어 동결 매니페스트(`extensions/core-v0.1.sha256`)로 무수정을 검사합니다.
+- 장치: `web_guard.py`(실행 전후 훅), `mwg.py`(MWG 실행 래퍼), `sync.py`(무결성 검증 고정 설치, 검증된 사본·`.mwgrc` 생성), `web_check.py`(설치·고정·사용 환경·참조 가이드 검사, 측정 집계), `web_scan.py`(레거시 검사), `install.py`(새 프로젝트·실증 중 프로젝트 공통).
+- v0.2 편입 준비물(방법론 9장 초안, 변경 계획, 체크리스트): [extensions/web/v0.2-merge/](extensions/web/v0.2-merge/README.md). 코어는 고치지 않았습니다.
+- **두 단계**: 기본 설치는 훅 없이 방법론 통합만(고정 버전·정책·사용 환경·참조 가이드·커밋 시점 검사), 실행 시점 훅은 `--with-guard`로 켜는 선택([HARDENING.md](extensions/web/HARDENING.md)).
+- 확장 규칙 R14~R18: 강제 0, 부분 4, 안내만 1. 위협 모델은 "실수하는 협조적 에이전트"이고, 의도적 우회를 막는 마지막 방어선은 서버 쪽 CI이고, 로컬 pre-commit은 조기 경보입니다.
+- 공개: 일부 우회(git `--output`, 글롭, 대소문자)는 코어 v0.1의 `protect_paths.py`에도 있습니다. 코어는 동결이라 고치지 않았고 v0.1.x 또는 v0.2 안건입니다.
+- 테스트 165개(매개변수 포함). 코어 테스트 37개와 코어 파일은 그대로입니다.
 
 ## v0.1 — 2026-11 (초판, 동결 예정 2026-11-09)
 

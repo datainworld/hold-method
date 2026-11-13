@@ -1,0 +1,14 @@
+# HOLD 웹 확장 web-0.1 — .pre-commit-config.yaml 의 local repo 의 hooks: 아래에 붙여 넣습니다 (사람).
+# Standard·Regulated 에서는 필수입니다 (web_check.py 가 확인).
+      - id: hold-web-check
+        name: 웹 확장 설치·고정 버전·사용 환경·참조 가이드 (R14·R16·R17)
+        entry: python .claude/hold-web/web_check.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: hold-web-legacy-scan
+        name: 웹 확장 레거시 패턴 검사 (R15)
+        entry: python .claude/hold-web/web_scan.py
+        language: system
+        pass_filenames: true
+        files: \.(html?|css|[mc]?[jt]s|jsx|tsx|vue|svelte|jinja2?|j2|njk)$
